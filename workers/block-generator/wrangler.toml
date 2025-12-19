@@ -1,0 +1,27 @@
+name = "eds-block-generator"
+main = "src/index.ts"
+compatibility_date = "2024-01-01"
+compatibility_flags = ["nodejs_compat"]
+
+# Load environment variables from parent .env file
+# Note: Wrangler automatically loads .env from current and parent directories
+
+[vars]
+ALLOWED_ORIGINS = "*"
+
+# Browser Rendering for screenshots (requires wrangler dev --remote or production)
+[browser]
+binding = "BROWSER"
+
+# Design analysis uses these env vars from .env:
+# - ANTHROPIC_USE_BEDROCK=1 (enables Bedrock)
+# - ANTHROPIC_AWS_BEARER_TOKEN_BEDROCK (Bedrock auth token)
+# - ANTHROPIC_AWS_REGION (default: us-east-1)
+# - ANTHROPIC_MODEL (Bedrock model ID)
+# Or for direct Anthropic API:
+# - ANTHROPIC_API_KEY
+
+# To enable design analysis:
+# 1. Ensure .env has Anthropic credentials
+# 2. Uncomment [browser] binding above
+# 3. Run with: wrangler dev --remote
