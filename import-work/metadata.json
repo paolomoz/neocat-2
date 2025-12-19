@@ -1,0 +1,59 @@
+{
+  "url": "https://www.virginatlanticcargo.com/gb/en.html",
+  "timestamp": "2025-12-19T15:02:30.272Z",
+  "paths": {
+    "documentPath": "/gb/en",
+    "htmlFilePath": "/gb/en.plain.html",
+    "mdFilePath": "/gb/en.md",
+    "dirPath": "/gb",
+    "filename": "en"
+  },
+  "screenshot": "import-work/screenshot.png",
+  "html": {
+    "filePath": "import-work/cleaned.html",
+    "size": 180203
+  },
+  "metadata": {
+    "title": "Virgin Atlantic Cargo | Home",
+    "viewport": "width=device-width, initial-scale=0.75, minimum-scale=0.75, maximum-scale=3.0",
+    "canonical": "https://www.virginatlanticcargo.com/gb/en.html"
+  },
+  "images": {
+    "count": 25,
+    "mapping": {
+      "https://www.virginatlanticcargo.com/content/dam/cargo/Images/Logo/cargo-logo.svg": "./images/b8f2a0162caca905e5d10db071fc0ecd.png",
+      "https://www.virginatlanticcargo.com/content/dam/virgin-applications/images/staticpages/misc/clear.gif": "./images/b1e2cd95334d4ed424ccda480cb55aea.png",
+      "https://www.virginatlanticcargo.com/content/dam/cargo/Images/icons/contact-us-icon.png": "./images/006e191c71f9357289a502d36296664c.png",
+      "https://www.virginatlanticcargo.com/content/dam/cargo/Images/icons/myVS-ST.png": "./images/303806603a217f7b0cbe32e4b20bba16.png",
+      "https://www.virginatlanticcargo.com/content/dam/cargo/Images/icons/login-desktop.png": "./images/09b00d03d24e4534e8af6963566c686b.png",
+      "https://www.virginatlanticcargo.com/content/dam/cargo/Images/icons/flight-schedules-small.jpg": "./images/5267ffa4c3d2024a19237bba05a02515.jpg",
+      "https://www.virginatlanticcargo.com/content/dam/va-shared/icons/covid-19/small/check-in.png": "./images/974a09dbcb3cefcd4d2079c513e5fe8c.png",
+      "https://www.virginatlanticcargo.com/content/dam/cargo/Images/icons/n3.png": "./images/ddef9108d0c885b8a5c11ef252f0042c.png",
+      "https://www.virginatlanticcargo.com/content/dam/virgin-applications/images/icons/widget_panel_sprite.png": "./images/635991c4d94b5581eaadb3c2b49e447c.png",
+      "https://www.virginatlanticcargo.com/content/dam/virgin-applications/images/icons/icon_arrow.png": "./images/d85d6b4e96515bc05710b7f690e78379.png",
+      "https://www.virginatlanticcargo.com/content/dam/virgin-applications/images/sitewide/sprites/Sprites_Air4Arrows.png": "./images/b7b826f22123dae081ceee6b81e28300.png",
+      "https://www.virginatlanticcargo.com/content/dam/cargo/products/vs-cargo-products.png": "./images/5b14a34c69d9db641fcdec95883a852d.png",
+      "https://www.virginatlanticcargo.com/content/dam/cargo/news/2025/Phuket%20cargo.jpg": "./images/afd0640efd622a56559c9a75852df1f5.jpg",
+      "https://www.virginatlanticcargo.com/content/dam/cargo/products/vs-cargo-service-levels.jpg": "./images/0bf2da6ad69797f9f3babc529d2062b3.jpg",
+      "https://www.virginatlanticcargo.com/content/dam/cargo/VAA_PeopleShoot_Cargo-6.jpg": "./images/3c2a87def593a4545cfb3e0549dc4a0d.jpg",
+      "https://www.virginatlanticcargo.com/content/dam/cargo/SWCKmerge592x333.jpg": "./images/a717661fe5f0fbed334573feb7f7e60a.jpg",
+      "https://www.virginatlanticcargo.com/content/dam/cargo/VA_cargo_christmas_2.png": "./images/da393fd1344f609229fc22455d57614c.png",
+      "https://www.virginatlanticcargo.com/content/dam/cargo/vscargo-a330neo.png": "./images/8dac458433646a8fe6cc04b2735dcbcb.png",
+      "https://www.virginatlanticcargo.com/content/dam/cargo/VA%20x%20CargoAi_592x333.jpg": "./images/7507bdc59a23dd37083944fdb5f3fda0.jpg",
+      "https://www.virginatlanticcargo.com/content/dam/cargo/WinterScheduleBanner_1500x640.jpg": "./images/6a4661804182161bab84c9b92c569672.jpg",
+      "https://virginatlantic.d3.sc.omtrdc.net/b/ss/virginatlanticcargoprod/1/JS-2.7.0/s35208553470398?AQB=1&pccr=true&vidn=34A2B4816330E9DC-600003F3248FFC0C&ndh=1&pf=1&t=19%2F11%2F2025%2016%3A2%3A26%205%20-60&fid=36C367C7AC628F8F-368092104D7D2043&ce=UTF-8&ns=virginatlantic&pageName=Virgin%20Atlantic%20Cargo%20%7C%20Home&g=https%3A%2F%2Fwww.virginatlanticcargo.com%2Fgb%2Fen.html&ch=Virgin%20Atlantic%20Cargo%20%7C%20Home&server=www.virginatlanticcargo.com&c41=Virgin%20Atlantic%20Cargo%20%7C%20Home&c49=Virgin%20Atlantic%20Cargo%20%7C%20Home&v53=D%3Dg&s=1280x720&c=24&j=1.6&v=N&k=Y&bw=1280&bh=720&AQE=1": "./images/3592d29413e432e3e1b936da1ec51967.png",
+      "https://www.virginatlanticcargo.com/content/dam/cargo/Images/icons/cookie-close.svg": "./images/2327700b32b065e5bb8d27bb9a8b46a8.png",
+      "https://www.virginatlanticcargo.com/content/dam/virgin-applications/images/sitewide/sprites/downarrow2.png": "./images/11b818ac6591d62684ebea60bb3482d9.png",
+      "https://www.virginatlanticcargo.com/content/dam/virgin-applications/images/sitewide/sprites/Mobile_Icons_Sprite.png": "./images/d395b77b67ea508f7a3d970dab800e88.png",
+      "https://www.virginatlanticcargo.com/content/dam/cargo/Images/icons/search-icon.svg": "./images/f92315aaec491be5e658e9ff96ef527c.png"
+    },
+    "stats": {
+      "total": 27,
+      "converted": 5,
+      "skipped": 20,
+      "failed": 2,
+      "tooLarge": 0,
+      "limitReached": 0
+    }
+  }
+}

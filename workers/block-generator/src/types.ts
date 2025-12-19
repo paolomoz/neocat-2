@@ -1,7 +1,24 @@
+// Bounding box for block region
+export interface BoundingBox {
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+}
+
 // Request/Response types
 export interface BlockRequest {
   url: string;
-  selector: string;
+  /** CSS selector (legacy) */
+  selector?: string;
+  /** Bounding box coordinates (legacy) */
+  boundingBox?: BoundingBox;
+  /** Additional sibling selectors to merge content from (legacy) */
+  siblingSelectors?: string[];
+  /** Section description from visual analysis (preferred) */
+  sectionDescription?: string;
+  /** Section name from visual analysis (preferred) */
+  sectionName?: string;
 }
 
 export interface BlockResponse {
