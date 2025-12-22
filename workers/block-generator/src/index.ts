@@ -2146,6 +2146,43 @@ function handleBlockTestUI(env: Env): Response {
     .tab-content.active {
       display: block;
     }
+    .option-tabs {
+      display: flex;
+      gap: 10px;
+      margin-bottom: 15px;
+    }
+    .option-tab {
+      padding: 8px 16px;
+      border: 2px solid #ddd;
+      border-radius: 6px;
+      cursor: pointer;
+      background: #f8f9fa;
+      font-weight: 500;
+      color: #666;
+      transition: all 0.2s;
+    }
+    .option-tab:hover {
+      border-color: #0066cc;
+      color: #0066cc;
+    }
+    .option-tab.active {
+      border-color: #0066cc;
+      background: #0066cc;
+      color: white;
+    }
+    .option-tab.loading {
+      border-color: #ffc107;
+      background: #fff3cd;
+      color: #856404;
+    }
+    .option-tab.error {
+      border-color: #dc3545;
+      background: #f8d7da;
+      color: #721c24;
+    }
+    .option-tab.success {
+      border-color: #28a745;
+    }
   </style>
 </head>
 <body>
@@ -2190,6 +2227,11 @@ function handleBlockTestUI(env: Env): Response {
 
       <div class="panel wide">
         <h2>Generated Block</h2>
+        <div class="option-tabs" id="optionTabs" style="display: none;">
+          <div class="option-tab active" onclick="switchOption(0)" id="optionTab0">Option 1</div>
+          <div class="option-tab" onclick="switchOption(1)" id="optionTab1">Option 2</div>
+          <div class="option-tab" onclick="switchOption(2)" id="optionTab2">Option 3</div>
+        </div>
         <div class="tabs">
           <div class="tab active" onclick="switchTab('html')">HTML</div>
           <div class="tab" onclick="switchTab('css')">CSS</div>
@@ -2237,8 +2279,9 @@ function handleBlockTestUI(env: Env): Response {
   </div>
 
   <script>
-    let currentBlock = null;
-    let iterations = 0;
+    let blocks = [null, null, null];  // Store 3 options
+    let iterations = [0, 0, 0];       // Track iterations per option
+    let activeOption = 0;             // Currently selected option
     let originalScreenshot = null;
     let currentViewport = 1440;
 
@@ -2285,7 +2328,34 @@ function handleBlockTestUI(env: Env): Response {
       document.getElementById(tab + 'Tab').classList.add('active');
     }
 
+    function switchOption(index) {
+      activeOption = index;
+      document.querySelectorAll('.option-tab').forEach((t, i) => {
+        t.classList.remove('active');
+        if (i === index) t.classList.add('active');
+      });
+      displayCurrentOption();
+      updatePreview();
+    }
+
+    function displayCurrentOption() {
+      const block = blocks[activeOption];
+      if (block) {
+        document.getElementById('generatedHtml').textContent = block.html;
+        document.getElementById('generatedCss').textContent = block.css;
+        document.getElementById('generatedJs').textContent = block.js;
+        document.getElementById('iterationCount').textContent = 'Iteration: ' + iterations[activeOption];
+        document.getElementById('refineBtn').disabled = false;
+      } else {
+        document.getElementById('generatedHtml').textContent = 'Generation in progress...';
+        document.getElementById('generatedCss').textContent = '';
+        document.getElementById('generatedJs').textContent = '';
+        document.getElementById('refineBtn').disabled = true;
+      }
+    }
+
     function updatePreview() {
+      const currentBlock = blocks[activeOption];
       if (!currentBlock) return;
 
       // Transform the JS to extract the decorate function and call it
@@ -2341,61 +2411,95 @@ function handleBlockTestUI(env: Env): Response {
         return;
       }
 
-      setStatus('Generating block...', 'loading');
+      // Reset state
+      blocks = [null, null, null];
+      iterations = [0, 0, 0];
+      activeOption = 0;
+
+      // Show option tabs and set all to loading state
+      document.getElementById('optionTabs').style.display = 'flex';
+      for (let i = 0; i < 3; i++) {
+        const tab = document.getElementById('optionTab' + i);
+        tab.className = 'option-tab loading' + (i === 0 ? ' active' : '');
+      }
+
+      setStatus('Generating 3 options in parallel...', 'loading');
       document.getElementById('generateBtn').disabled = true;
+      document.getElementById('refineBtn').disabled = true;
 
-      try {
-        const formData = new FormData();
-        formData.append('url', url);
-        formData.append('screenshot', screenshot);
-        if (html) formData.append('html', html);
-        if (xpath) formData.append('xpath', xpath);
-
-        const response = await fetch('/block-generate', {
-          method: 'POST',
-          body: formData
-        });
-
-        // Get response as text first to handle non-JSON responses
-        const responseText = await response.text();
-        let result;
+      // Create 3 parallel requests
+      const requests = [0, 1, 2].map(async (index) => {
         try {
-          result = JSON.parse(responseText);
-        } catch (parseError) {
-          // Response is not JSON - show what we got
-          console.error('Non-JSON response:', responseText.substring(0, 500));
-          setStatus('Server returned non-JSON response (status ' + response.status + '): ' + responseText.substring(0, 200), 'error');
-          return;
+          const formData = new FormData();
+          formData.append('url', url);
+          formData.append('screenshot', screenshot);
+          if (html) formData.append('html', html);
+          if (xpath) formData.append('xpath', xpath);
+
+          const response = await fetch('/block-generate', {
+            method: 'POST',
+            body: formData
+          });
+
+          const responseText = await response.text();
+          let result;
+          try {
+            result = JSON.parse(responseText);
+          } catch (parseError) {
+            throw new Error('Non-JSON response: ' + responseText.substring(0, 100));
+          }
+
+          if (result.success) {
+            blocks[index] = {
+              html: result.html,
+              css: result.css,
+              js: result.js,
+              blockName: result.blockName
+            };
+            iterations[index] = 1;
+
+            // Update tab to success state
+            document.getElementById('optionTab' + index).className = 'option-tab success' + (index === activeOption ? ' active' : '');
+
+            // If this is the active option, display it
+            if (index === activeOption) {
+              displayCurrentOption();
+              updatePreview();
+            }
+
+            return { success: true, index };
+          } else {
+            throw new Error(result.error);
+          }
+        } catch (error) {
+          // Update tab to error state
+          document.getElementById('optionTab' + index).className = 'option-tab error' + (index === activeOption ? ' active' : '');
+          return { success: false, index, error: error.message };
         }
+      });
 
-        if (result.success) {
-          currentBlock = {
-            html: result.html,
-            css: result.css,
-            js: result.js,
-            blockName: result.blockName
-          };
-          iterations = 1;
+      // Wait for all requests to complete
+      const results = await Promise.all(requests);
+      const successCount = results.filter(r => r.success).length;
 
-          document.getElementById('generatedHtml').textContent = result.html;
-          document.getElementById('generatedCss').textContent = result.css;
-          document.getElementById('generatedJs').textContent = result.js;
-          document.getElementById('refineBtn').disabled = false;
-          document.getElementById('iterationCount').textContent = 'Iteration: ' + iterations;
+      document.getElementById('generateBtn').disabled = false;
 
-          updatePreview();
-          setStatus('Block generated successfully!', 'success');
-        } else {
-          setStatus('Error: ' + result.error, 'error');
-        }
-      } catch (error) {
-        setStatus('Error: ' + error.message, 'error');
-      } finally {
-        document.getElementById('generateBtn').disabled = false;
+      if (successCount === 0) {
+        setStatus('All generations failed: ' + results[0].error, 'error');
+      } else if (successCount < 3) {
+        setStatus(successCount + ' of 3 options generated successfully', 'success');
+      } else {
+        setStatus('All 3 options generated successfully!', 'success');
+      }
+
+      // Enable refine if current option has a block
+      if (blocks[activeOption]) {
+        document.getElementById('refineBtn').disabled = false;
       }
     }
 
     async function refine() {
+      const currentBlock = blocks[activeOption];
       if (!currentBlock || !originalScreenshot) {
         setStatus('Please generate a block first', 'error');
         return;
@@ -2406,7 +2510,7 @@ function handleBlockTestUI(env: Env): Response {
       const xpath = document.getElementById('xpath').value;
       const refinePrompt = document.getElementById('refinePrompt').value;
 
-      setStatus('Refining block (iteration ' + (iterations + 1) + ')...', 'loading');
+      setStatus('Refining Option ' + (activeOption + 1) + ' (iteration ' + (iterations[activeOption] + 1) + ')...', 'loading');
       document.getElementById('refineBtn').disabled = true;
 
       try {
@@ -2438,18 +2542,15 @@ function handleBlockTestUI(env: Env): Response {
         }
 
         if (result.success) {
-          currentBlock = {
+          blocks[activeOption] = {
             html: result.html,
             css: result.css,
             js: result.js,
             blockName: result.blockName
           };
-          iterations++;
+          iterations[activeOption]++;
 
-          document.getElementById('generatedHtml').textContent = result.html;
-          document.getElementById('generatedCss').textContent = result.css;
-          document.getElementById('generatedJs').textContent = result.js;
-          document.getElementById('iterationCount').textContent = 'Iteration: ' + iterations;
+          displayCurrentOption();
 
           // Show comparison images
           document.getElementById('imagesRow').style.display = 'grid';
@@ -2459,7 +2560,7 @@ function handleBlockTestUI(env: Env): Response {
           }
 
           updatePreview();
-          setStatus('Block refined! ' + (result.refinementNotes || ''), 'success');
+          setStatus('Option ' + (activeOption + 1) + ' refined! ' + (result.refinementNotes || ''), 'success');
         } else {
           setStatus('Error: ' + result.error, 'error');
         }
