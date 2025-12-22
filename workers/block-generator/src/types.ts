@@ -144,15 +144,7 @@ export interface Env {
   ANTHROPIC_USE_BEDROCK?: string;
   ANTHROPIC_AWS_BEARER_TOKEN_BEDROCK?: string;
   ANTHROPIC_AWS_REGION?: string;
-  ANTHROPIC_MODEL_SONNET?: string;
-  ANTHROPIC_MODEL_OPUS?: string;
-  // Google Gemini API
-  GOOGLE_API_KEY?: string;
-  // Cerebras API
-  CEREBRAS_API_KEY?: string;
+  ANTHROPIC_MODEL?: string;
   // Cloudflare Browser Rendering
   BROWSER?: Fetcher;
 }
-
-// Supported LLM models
-export type LLMModel = 'claude-sonnet' | 'claude-opus' | 'gemini-flash' | 'cerebras-qwen';

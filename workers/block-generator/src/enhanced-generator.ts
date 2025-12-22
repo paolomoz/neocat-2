@@ -1,22 +1,11 @@
 import { parseHTML } from 'linkedom';
-import { callLLMWithVision, ImageContent } from './llm-service';
-import { Env, LLMModel } from './types';
-
-/**
- * EDS Content Model Type (from content-modeling skill)
- * - standalone: Distinct visual or narrative element (Hero, Blockquote)
- * - collection: Repeating semi-structured content (Cards, Carousel)
- * - configuration: API-driven or dynamic content with key/value config
- * - auto-blocked: Complex structures transformed from sections
- */
-export type EDSContentModelType = 'standalone' | 'collection' | 'configuration' | 'auto-blocked';
+import { AnthropicConfig } from './design-analyzer';
 
 /**
  * Detailed component description from Claude
  */
 export interface ComponentDescription {
   componentType: string;  // e.g., "hero-with-overlay", "card-grid", "feature-columns"
-  edsModelType: EDSContentModelType;  // EDS content model classification
   structure: {
     layout: string;       // e.g., "full-width image with left-aligned text overlay"
     layers?: string[];    // e.g., ["background-image", "overlay", "text-content"]
@@ -59,35 +48,28 @@ export interface EnhancedBlockCode {
  */
 export async function describeComponent(
   screenshotBase64: string,
-  env: Env,
-  imageMediaType: 'image/png' | 'image/jpeg' = 'image/png',
-  llmModel: LLMModel = 'claude-sonnet'
+  config: AnthropicConfig,
+  imageMediaType: 'image/png' | 'image/jpeg' = 'image/png'
 ): Promise<ComponentDescription> {
-  const prompt = `Analyze this web component screenshot in detail for AEM Edge Delivery Services (EDS).
+  const prompt = `Analyze this web component screenshot in detail.
 
 Describe:
 1. **Component Type**: What kind of component is this? (e.g., hero-banner, card-grid, feature-section, testimonial-carousel)
 
-2. **EDS Content Model Type**: Classify as one of:
-   - "standalone": A distinct, unique visual element that typically appears once (Hero, Blockquote, Banner)
-   - "collection": Repeating similar items in a grid/list pattern (Cards, Team Members, Features grid)
-   - "configuration": Would need API or dynamic data with key/value config settings
-   - "auto-blocked": Complex nested structure that would be better authored as sections
-
-3. **Structure**:
+2. **Structure**:
    - Layout: How is content arranged? (e.g., "full-width with centered content", "2-column with image left")
    - Layers: What visual layers exist? (e.g., background image, overlay, content box)
    - Content Hierarchy: What content elements exist in order? (e.g., eyebrow, heading, paragraph, CTA)
    - If it's a grid/cards: How many columns/rows? What's in each item?
 
-4. **Design**:
+3. **Design**:
    - Color scheme: Describe the colors and contrast
    - Background treatment: How is the background styled?
    - Text style: Typography choices (size, weight, color)
    - Spacing: Padding, margins, gaps
    - Effects: Any shadows, rounded corners, gradients, hover states?
 
-5. **Content Elements**: List the actual content visible:
+4. **Content Elements**: List the actual content visible:
    - Headings (exact text)
    - Paragraphs (first few words)
    - Images (describe each, note if background/icon/photo)
@@ -96,7 +78,6 @@ Describe:
 Return as JSON:
 {
   "componentType": "hero-with-overlay",
-  "edsModelType": "standalone",
   "structure": {
     "layout": "full-width background image with text content in semi-transparent box on left",
     "layers": ["full-bleed-background-image", "left-aligned-overlay-box", "text-content"],
@@ -119,13 +100,7 @@ Return as JSON:
 
 Return ONLY the JSON object.`;
 
-  const images: ImageContent[] = [{
-    base64: screenshotBase64,
-    mediaType: imageMediaType,
-    label: 'Component screenshot'
-  }];
-
-  const response = await callLLMWithVision(images, prompt, { model: llmModel, env });
+  const response = await callClaude(screenshotBase64, prompt, config, imageMediaType);
 
   try {
     const match = response.match(/\{[\s\S]*\}/);
@@ -341,10 +316,9 @@ export async function generateCodeEnhanced(
   screenshotBase64: string,
   description: ComponentDescription,
   extractedContent: ExtractedContent,
-  env: Env,
+  config: AnthropicConfig,
   extractedCssStyles?: string,
-  imageMediaType: 'image/png' | 'image/jpeg' = 'image/png',
-  llmModel: LLMModel = 'claude-sonnet'
+  imageMediaType: 'image/png' | 'image/jpeg' = 'image/png'
 ): Promise<EnhancedBlockCode> {
   // Build a rich prompt with all context
   const contentSummary = `
@@ -355,52 +329,13 @@ EXTRACTED CONTENT:
 - CTAs: ${extractedContent.ctas.map(c => `"${c.text}" (${c.style}) -> ${c.href}`).join(', ')}
 `;
 
-  // Get EDS model type with fallback
-  const edsModelType = description.edsModelType || 'standalone';
-
-  // Generate model-specific guidance
-  let modelGuidance = '';
-  switch (edsModelType) {
-    case 'collection':
-      modelGuidance = `
-EDS MODEL: Collection Block
-- Each row in the block table represents ONE item in the collection
-- All items should have the same cell structure (e.g., image | title | description)
-- Decoration should iterate over rows to create the visual items
-- Example: Cards, Team Members, Feature Grid`;
-      break;
-    case 'configuration':
-      modelGuidance = `
-EDS MODEL: Configuration Block
-- Use key/value pairs for settings (left column = key, right column = value)
-- Block pulls dynamic data based on configuration
-- Example: Blog Listing with limit|10, sort|date-desc`;
-      break;
-    case 'auto-blocked':
-      modelGuidance = `
-EDS MODEL: Auto-Blocked
-- Complex structure transformed from section content
-- Authors create normal sections, decoration transforms them
-- Example: Tabs from H2 headings, Accordion from sections`;
-      break;
-    default: // standalone
-      modelGuidance = `
-EDS MODEL: Standalone Block
-- A distinct, unique visual element (typically appears once per page)
-- Flexible cell structure - all content in one cell or split across rows/columns
-- Decoration transforms the authored structure into final visual layout
-- Example: Hero, Blockquote, Banner`;
-  }
-
   const structureSummary = `
 COMPONENT ANALYSIS:
 - Type: ${description.componentType}
-- EDS Model: ${edsModelType}
 - Layout: ${description.structure.layout}
 - Layers: ${description.structure.layers?.join(' → ') || 'N/A'}
 - Content hierarchy: ${description.structure.contentHierarchy.join(' → ')}
 ${description.structure.gridInfo ? `- Grid: ${description.structure.gridInfo.columns} columns, items have: ${description.structure.gridInfo.itemStructure.join(', ')}` : ''}
-${modelGuidance}
 
 DESIGN NOTES:
 - Colors: ${description.design.colorScheme}
@@ -424,106 +359,19 @@ ${structureSummary}
 
 ${contentSummary}
 ${cssSection}
+## EDS Block Requirements
 
-## EDS Block Structure
-
-EDS blocks use a simple table-based content model that gets rendered as nested divs:
-
+HTML structure:
 \`\`\`html
-<!-- Initial HTML structure (from authored content) -->
-<div class="{block-name} block" data-block-name="{block-name}">
+<div class="{block-name} block">
   <div><!-- row 1 -->
-    <div><!-- cell 1: content --></div>
-    <div><!-- cell 2: content --></div>
-  </div>
-  <div><!-- row 2 -->
-    <div><!-- cell content --></div>
+    <div><!-- cell 1 --></div>
+    <div><!-- cell 2 --></div>
   </div>
 </div>
 \`\`\`
 
 The JS decoration function transforms this into the final rendered structure.
-
-## JavaScript Decoration Guidelines
-
-The decorate function MUST follow these patterns:
-
-\`\`\`javascript
-// REQUIRED: Export default async function
-export default async function decorate(block) {
-  // 1. Query existing content from the block's row/cell structure
-  const rows = block.querySelectorAll(':scope > div');
-  const firstRow = rows[0];
-  const cells = firstRow?.querySelectorAll(':scope > div');
-
-  // 2. Extract content from cells
-  const imageCell = cells[0];
-  const textCell = cells[1];
-  const picture = imageCell?.querySelector('picture');
-  const heading = textCell?.querySelector('h1, h2, h3');
-
-  // 3. Create semantic wrapper elements
-  const wrapper = document.createElement('div');
-  wrapper.className = '{block-name}-content';
-
-  // 4. Move/restructure content (don't clone unless necessary)
-  if (picture) wrapper.append(picture);
-  if (heading) wrapper.append(heading);
-
-  // 5. Clear and rebuild block structure
-  block.textContent = '';
-  block.append(wrapper);
-}
-\`\`\`
-
-**Key JS Rules:**
-- Use \`:scope > div\` to select direct children only
-- Use \`append()\` to move elements (not clone)
-- Create new wrapper elements with \`document.createElement()\`
-- Handle variants via \`block.classList.contains('variant-name')\`
-- Keep decoration logic simple and focused
-- For images, work with the \`<picture>\` element, not \`<img>\` directly
-
-## CSS Styling Guidelines
-
-**CRITICAL: All CSS selectors MUST be scoped to the block:**
-
-\`\`\`css
-/* CORRECT: Scoped with main .block-name */
-main .{block-name} {
-  /* block container styles */
-}
-
-main .{block-name} .{block-name}-content {
-  /* wrapper styles */
-}
-
-main .{block-name} h2 {
-  /* heading styles within this block */
-}
-
-/* WRONG: Never use unscoped selectors */
-.{block-name} { } /* Missing main prefix */
-h2 { } /* Completely unscoped */
-\`\`\`
-
-**CSS Best Practices:**
-1. **Mobile-first**: Base styles for mobile, then use min-width media queries
-2. **CSS Custom Properties**: Use existing variables when possible:
-   \`\`\`css
-   main .{block-name} {
-     font-family: var(--body-font-family);
-     color: var(--text-color);
-     background-color: var(--background-color);
-   }
-   \`\`\`
-3. **Responsive breakpoints**:
-   \`\`\`css
-   @media (min-width: 600px) { /* tablet */ }
-   @media (min-width: 900px) { /* desktop */ }
-   \`\`\`
-4. **Low specificity**: Avoid !important, keep selectors simple
-5. **BEM-like naming**: Use {block-name}-{element} for created wrappers
 
 ## Critical Instructions
 
@@ -538,26 +386,20 @@ h2 { } /* Completely unscoped */
    - Is there a card background or is content directly on the page?
 6. **NEVER invent image URLs** - only use URLs from EXTRACTED CONTENT
 7. **NEVER use base64 or localhost URLs**
-8. **Always scope CSS with \`main .{block-name}\`** - this is mandatory for EDS
 
 ## Return Format
 
 Return JSON:
 {
   "blockName": "descriptive-block-name",
-  "html": "<!-- EDS block markup with rows and cells containing actual content -->",
-  "css": "/* Properly scoped CSS starting with main .{block-name} */",
-  "js": "/* ES module: export default async function decorate(block) { ... } */"
+  "html": "<!-- EDS block markup with actual content -->",
+  "css": "/* Complete CSS using the EXACT extracted values */",
+  "js": "/* ES module: export default function decorate(block) { ... } */"
 }
 
 Return ONLY the JSON object.`;
 
-  const images: ImageContent[] = [{
-    base64: screenshotBase64,
-    mediaType: imageMediaType,
-    label: 'Component screenshot'
-  }];
-  const response = await callLLMWithVision(images, prompt, { model: llmModel, env }, 8192);
+  const response = await callClaude(screenshotBase64, prompt, config, imageMediaType, 8192);
 
   try {
     // Try code block first
@@ -604,15 +446,14 @@ export async function generateBlockEnhanced(
   screenshotBase64: string,
   elementHtml: string,
   baseUrl: string,
-  env: Env,
+  config: AnthropicConfig,
   extractedCssStyles?: string,
   liveImages?: LiveImage[],
-  imageMediaType: 'image/png' | 'image/jpeg' = 'image/png',
-  llmModel: LLMModel = 'claude-sonnet'
+  imageMediaType: 'image/png' | 'image/jpeg' = 'image/png'
 ): Promise<EnhancedBlockCode> {
-  console.log(`generateBlockEnhanced: received imageMediaType=${imageMediaType}, model=${llmModel}`);
+  console.log(`generateBlockEnhanced: received imageMediaType=${imageMediaType}`);
   console.log('Step 1: Describing component...');
-  const description = await describeComponent(screenshotBase64, env, imageMediaType, llmModel);
+  const description = await describeComponent(screenshotBase64, config, imageMediaType);
   console.log(`  Component type: ${description.componentType}`);
   console.log(`  Layout: ${description.structure.layout}`);
 
@@ -646,206 +487,89 @@ export async function generateBlockEnhanced(
   if (extractedCssStyles) {
     console.log('  Including extracted CSS styles in generation');
   }
-  const block = await generateCodeEnhanced(screenshotBase64, description, content, env, extractedCssStyles, imageMediaType, llmModel);
+  const block = await generateCodeEnhanced(screenshotBase64, description, content, config, extractedCssStyles, imageMediaType);
   console.log(`  Generated block: ${block.blockName}`);
-
-  // Step 4: Validate and fix image URLs (LLMs sometimes hallucinate URLs)
-  if (content.images.length > 0) {
-    console.log('Step 4: Validating image URLs...');
-    block.html = validateAndFixImageUrls(block.html, content.images);
-    block.css = validateAndFixImageUrls(block.css, content.images);
-  }
-
-  // Step 5: Validate and fix CSS scoping (ensure all selectors start with main .block-name)
-  console.log('Step 5: Validating CSS scoping...');
-  block.css = validateAndFixCssScoping(block.css, block.blockName);
 
   return block;
 }
 
 /**
- * Validate image URLs in generated code and replace hallucinated ones with real extracted URLs
+ * Helper to call Claude API
  */
-function validateAndFixImageUrls(
-  code: string,
-  extractedImages: Array<{ src: string; alt: string; role: string }>
-): string {
-  if (!code || extractedImages.length === 0) return code;
+async function callClaude(
+  imageBase64: string,
+  prompt: string,
+  config: AnthropicConfig,
+  imageMediaType: 'image/png' | 'image/jpeg' = 'image/png',
+  maxTokens: number = 4096
+): Promise<string> {
+  console.log(`callClaude: using media type ${imageMediaType}, image length ${imageBase64.length}`);
+  let response: Response;
 
-  const validUrls = new Set(extractedImages.map(img => img.src));
+  if (config.useBedrock && config.bedrockToken) {
+    const region = config.bedrockRegion || 'us-east-1';
+    const model = config.bedrockModel || 'anthropic.claude-sonnet-4-20250514-v1:0';
+    const bedrockUrl = `https://bedrock-runtime.${region}.amazonaws.com/model/${encodeURIComponent(model)}/invoke`;
 
-  // Find all URLs in the code (both in src attributes and CSS url())
-  const urlPatterns = [
-    // HTML src/href attributes
-    /(src|href)=["']([^"']+\.(jpg|jpeg|png|gif|webp|svg)[^"']*)["']/gi,
-    // CSS url()
-    /url\(["']?([^"')]+\.(jpg|jpeg|png|gif|webp|svg)[^"')]*)["']?\)/gi,
-    // CSS background-image
-    /background(-image)?:\s*url\(["']?([^"')]+)["']?\)/gi,
-  ];
-
-  let fixedCode = code;
-  let replacementsMade = 0;
-
-  // Extract all image URLs from the code
-  const foundUrls: string[] = [];
-  for (const pattern of urlPatterns) {
-    const matches = code.matchAll(pattern);
-    for (const match of matches) {
-      // Get the URL part (different capture group positions for different patterns)
-      const url = match[2] || match[1];
-      if (url && !url.startsWith('data:')) {
-        foundUrls.push(url);
-      }
-    }
+    response = await fetch(bedrockUrl, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': `Bearer ${config.bedrockToken}`,
+      },
+      body: JSON.stringify({
+        anthropic_version: 'bedrock-2023-05-31',
+        max_tokens: maxTokens,
+        messages: [
+          {
+            role: 'user',
+            content: [
+              { type: 'image', source: { type: 'base64', media_type: imageMediaType, data: imageBase64 } },
+              { type: 'text', text: prompt },
+            ],
+          },
+        ],
+      }),
+    });
+  } else if (config.apiKey) {
+    response = await fetch('https://api.anthropic.com/v1/messages', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'x-api-key': config.apiKey,
+        'anthropic-version': '2023-06-01',
+      },
+      body: JSON.stringify({
+        model: 'claude-sonnet-4-20250514',
+        max_tokens: maxTokens,
+        messages: [
+          {
+            role: 'user',
+            content: [
+              { type: 'image', source: { type: 'base64', media_type: imageMediaType, data: imageBase64 } },
+              { type: 'text', text: prompt },
+            ],
+          },
+        ],
+      }),
+    });
+  } else {
+    throw new Error('No Anthropic API configuration provided');
   }
 
-  // Check each found URL and replace if not in our valid list
-  for (const url of foundUrls) {
-    if (!validUrls.has(url)) {
-      // This URL was hallucinated - find the best replacement
-      const replacement = findBestImageMatch(url, extractedImages);
-      if (replacement && replacement !== url) {
-        console.log(`  Replacing hallucinated URL: ${url.substring(0, 60)}...`);
-        console.log(`  With extracted URL: ${replacement.substring(0, 60)}...`);
-        // Escape special regex characters in the URL
-        const escapedUrl = url.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-        fixedCode = fixedCode.replace(new RegExp(escapedUrl, 'g'), replacement);
-        replacementsMade++;
-      }
-    }
+  if (!response.ok) {
+    const error = await response.text();
+    throw new Error(`Claude API error: ${response.status} - ${error}`);
   }
 
-  if (replacementsMade > 0) {
-    console.log(`  Fixed ${replacementsMade} hallucinated image URL(s)`);
+  const result = await response.json() as {
+    content: Array<{ type: string; text?: string }>;
+  };
+
+  const textContent = result.content.find(c => c.type === 'text');
+  if (!textContent?.text) {
+    throw new Error('No text response from Claude');
   }
 
-  return fixedCode;
-}
-
-/**
- * Find the best matching image from extracted images based on context clues
- */
-function findBestImageMatch(
-  hallucinatedUrl: string,
-  extractedImages: Array<{ src: string; alt: string; role: string }>
-): string | null {
-  if (extractedImages.length === 0) return null;
-
-  // Try to match by role based on URL hints
-  const urlLower = hallucinatedUrl.toLowerCase();
-
-  // Check for background/hero hints
-  if (urlLower.includes('hero') || urlLower.includes('background') || urlLower.includes('banner') || urlLower.includes('bg')) {
-    const bgImage = extractedImages.find(img => img.role === 'background');
-    if (bgImage) return bgImage.src;
-  }
-
-  // Check for icon hints
-  if (urlLower.includes('icon') || urlLower.includes('logo')) {
-    const iconImage = extractedImages.find(img => img.role === 'icon');
-    if (iconImage) return iconImage.src;
-  }
-
-  // Default: return the first background image, or first image overall
-  const bgImage = extractedImages.find(img => img.role === 'background');
-  if (bgImage) return bgImage.src;
-
-  return extractedImages[0]?.src || null;
-}
-
-/**
- * Validate and fix CSS scoping to ensure all selectors start with `main .{block-name}`
- * This is critical for EDS compatibility - unscoped styles will leak to other blocks
- */
-function validateAndFixCssScoping(css: string, blockName: string): string {
-  if (!css || !blockName) return css;
-
-  // Split CSS into rule blocks (handling media queries and nested rules)
-  const lines = css.split('\n');
-  const fixedLines: string[] = [];
-  let insideMediaQuery = false;
-  let mediaQueryDepth = 0;
-  let fixCount = 0;
-
-  for (const line of lines) {
-    const trimmed = line.trim();
-
-    // Track media query depth
-    if (trimmed.startsWith('@media')) {
-      insideMediaQuery = true;
-      mediaQueryDepth++;
-      fixedLines.push(line);
-      continue;
-    }
-
-    // Track closing braces for media queries
-    if (insideMediaQuery) {
-      const openBraces = (line.match(/{/g) || []).length;
-      const closeBraces = (line.match(/}/g) || []).length;
-      mediaQueryDepth += openBraces - closeBraces;
-      if (mediaQueryDepth <= 0) {
-        insideMediaQuery = false;
-        mediaQueryDepth = 0;
-      }
-    }
-
-    // Skip empty lines, comments, and closing braces
-    if (!trimmed || trimmed.startsWith('/*') || trimmed.startsWith('*') || trimmed === '}' || trimmed === '{') {
-      fixedLines.push(line);
-      continue;
-    }
-
-    // Skip @keyframes, @font-face, and other at-rules
-    if (trimmed.startsWith('@')) {
-      fixedLines.push(line);
-      continue;
-    }
-
-    // Check if this line looks like a selector (contains { at end or is followed by {)
-    if (trimmed.includes('{') || (trimmed.match(/^[.#a-zA-Z\[\]:*]/) && !trimmed.includes(':'))) {
-      // Extract the selector part (before the {)
-      const selectorPart = trimmed.split('{')[0].trim();
-
-      if (selectorPart) {
-        // Check if selector is properly scoped
-        const isProperlyScoped = selectorPart.startsWith('main ') ||
-                                  selectorPart.startsWith('main.') ||
-                                  selectorPart.includes('main .') ||
-                                  selectorPart.startsWith(':root') ||
-                                  selectorPart.startsWith('@');
-
-        if (!isProperlyScoped) {
-          // Fix the scoping
-          const selectors = selectorPart.split(',').map(s => s.trim());
-          const fixedSelectors = selectors.map(selector => {
-            // Already has block class reference
-            if (selector.includes(`.${blockName}`)) {
-              // Just needs main prefix
-              return `main ${selector}`;
-            }
-            // Needs full scoping
-            return `main .${blockName} ${selector}`;
-          });
-
-          const fixedSelector = fixedSelectors.join(',\n');
-          const restOfLine = trimmed.includes('{') ? ' {' + trimmed.split('{').slice(1).join('{') : '';
-
-          // Preserve original indentation
-          const indent = line.match(/^(\s*)/)?.[1] || '';
-          fixedLines.push(`${indent}${fixedSelector}${restOfLine}`);
-          fixCount++;
-          continue;
-        }
-      }
-    }
-
-    fixedLines.push(line);
-  }
-
-  if (fixCount > 0) {
-    console.log(`  Fixed ${fixCount} unscoped CSS selector(s) to use main .${blockName}`);
-  }
-
-  return fixedLines.join('\n');
+  return textContent.text;
 }

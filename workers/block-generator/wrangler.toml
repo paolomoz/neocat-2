@@ -13,11 +13,6 @@ ALLOWED_ORIGINS = "*"
 [browser]
 binding = "BROWSER"
 
-# Increase timeout for slow LLM calls (Workers Unbound)
-# This allows requests to run up to 5 minutes instead of 30 seconds
-[limits]
-cpu_ms = 300000
-
 # Design analysis uses these env vars from .env:
 # - ANTHROPIC_USE_BEDROCK=1 (enables Bedrock)
 # - ANTHROPIC_AWS_BEARER_TOKEN_BEDROCK (Bedrock auth token)

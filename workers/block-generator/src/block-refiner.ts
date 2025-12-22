@@ -1,6 +1,5 @@
 import { Browser } from '@cloudflare/puppeteer';
-import { callLLMWithVision, ImageContent } from './llm-service';
-import { Env, LLMModel } from './types';
+import { AnthropicConfig } from './design-analyzer';
 
 /**
  * Block code structure
@@ -152,17 +151,16 @@ export async function renderBlockToScreenshot(
 }
 
 /**
- * Analyze visual differences and suggest refinements using LLM Vision
+ * Analyze visual differences and suggest refinements using Claude Vision
  */
 export async function analyzeAndRefine(
   originalScreenshotBase64: string,
   generatedScreenshotBase64: string,
   currentBlock: BlockCode,
-  env: Env,
+  config: AnthropicConfig,
   userPrompt?: string,
   originalMediaType: 'image/png' | 'image/jpeg' = 'image/png',
-  generatedMediaType: 'image/png' | 'image/jpeg' = 'image/png',
-  llmModel: LLMModel = 'claude-sonnet'
+  generatedMediaType: 'image/png' | 'image/jpeg' = 'image/png'
 ): Promise<BlockCode> {
   let focusInstructions = `Focus on:
 - Colors (backgrounds, text, borders)
@@ -220,12 +218,13 @@ Return ONLY a JSON object with the refined code:
 
 Make targeted changes to fix the visual differences you observe.`;
 
-  const images: ImageContent[] = [
-    { base64: originalScreenshotBase64, mediaType: originalMediaType, label: 'Original design (target)' },
-    { base64: generatedScreenshotBase64, mediaType: generatedMediaType, label: 'Generated block (current)' }
-  ];
-
-  const response = await callLLMWithVision(images, prompt, { model: llmModel, env }, 8192);
+  const response = await callClaudeWithImages(
+    [originalScreenshotBase64, generatedScreenshotBase64],
+    ['Original design (target)', 'Generated block (current)'],
+    [originalMediaType, generatedMediaType],
+    prompt,
+    config
+  );
 
   // Parse response
   const jsonMatch = response.match(/\{[\s\S]*\}/);
@@ -249,16 +248,103 @@ Make targeted changes to fix the visual differences you observe.`;
 }
 
 /**
- * Full refinement pipeline: render, analyze with LLM Vision, refine
+ * Helper to call Claude API with multiple images
+ */
+async function callClaudeWithImages(
+  imagesBase64: string[],
+  imageLabels: string[],
+  imageMediaTypes: Array<'image/png' | 'image/jpeg'>,
+  prompt: string,
+  config: AnthropicConfig,
+  maxTokens: number = 8192
+): Promise<string> {
+  // Build content array with all images
+  const content: Array<{ type: string; source?: any; text?: string }> = [];
+
+  for (let i = 0; i < imagesBase64.length; i++) {
+    content.push({
+      type: 'text',
+      text: `Image ${i + 1}: ${imageLabels[i]}`
+    });
+    content.push({
+      type: 'image',
+      source: {
+        type: 'base64',
+        media_type: imageMediaTypes[i] || 'image/png',
+        data: imagesBase64[i]
+      }
+    });
+  }
+
+  content.push({
+    type: 'text',
+    text: prompt
+  });
+
+  let response: Response;
+
+  if (config.useBedrock && config.bedrockToken) {
+    const region = config.bedrockRegion || 'us-east-1';
+    const model = config.bedrockModel || 'anthropic.claude-sonnet-4-20250514-v1:0';
+    const bedrockUrl = `https://bedrock-runtime.${region}.amazonaws.com/model/${encodeURIComponent(model)}/invoke`;
+
+    response = await fetch(bedrockUrl, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': `Bearer ${config.bedrockToken}`,
+      },
+      body: JSON.stringify({
+        anthropic_version: 'bedrock-2023-05-31',
+        max_tokens: maxTokens,
+        messages: [{ role: 'user', content }],
+      }),
+    });
+  } else if (config.apiKey) {
+    response = await fetch('https://api.anthropic.com/v1/messages', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'x-api-key': config.apiKey,
+        'anthropic-version': '2023-06-01',
+      },
+      body: JSON.stringify({
+        model: 'claude-sonnet-4-20250514',
+        max_tokens: maxTokens,
+        messages: [{ role: 'user', content }],
+      }),
+    });
+  } else {
+    throw new Error('No Anthropic API configuration provided');
+  }
+
+  if (!response.ok) {
+    const error = await response.text();
+    throw new Error(`Claude API error: ${response.status} - ${error}`);
+  }
+
+  const result = await response.json() as {
+    content: Array<{ type: string; text?: string }>;
+  };
+
+  const textContent = result.content.find(c => c.type === 'text');
+  if (!textContent?.text) {
+    throw new Error('No text response from Claude');
+  }
+
+  return textContent.text;
+}
+
+/**
+ * Full refinement pipeline: render, analyze with Claude Vision, refine
  */
 export async function refineBlock(
   browser: Browser,
   originalScreenshotBase64: string,
   currentBlock: BlockCode,
-  env: Env,
+  config: AnthropicConfig,
   viewport: { width: number; height: number } = { width: 1440, height: 900 },
-  userPrompt?: string,
-  llmModel: LLMModel = 'claude-sonnet'
+  userPrompt?: string
 ): Promise<RefinementResult> {
   // Step 1: Render current block
   console.log('Rendering generated block...');
@@ -279,11 +365,10 @@ export async function refineBlock(
     compressedOriginal.data,
     compressedGenerated.data,
     currentBlock,
-    env,
+    config,
     userPrompt,
     compressedOriginal.mediaType,
-    compressedGenerated.mediaType,
-    llmModel
+    compressedGenerated.mediaType
   );
 
   // Step 4: Re-render refined block for preview

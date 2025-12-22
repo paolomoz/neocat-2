@@ -4,9 +4,7 @@ import {
   ErrorResponse,
   BlockGeneratorError,
   Env,
-  LLMModel,
 } from './types';
-import { isModelAvailable, getModelDisplayName } from './llm-service';
 import { fetchPage } from './fetcher';
 import { parseHTMLDocument, getElement } from './parser';
 import { extractContent } from './content-extractor';
@@ -1633,25 +1631,6 @@ async function handleBlockGenerate(request: Request, env: Env): Promise<Response
     const screenshotFile = formData.get('screenshot') as File;
     let html = formData.get('html') as string;
     const xpath = formData.get('xpath') as string;
-    const modelParam = formData.get('model') as string;
-
-    // Parse and validate model parameter
-    const llmModel: LLMModel = (modelParam as LLMModel) || 'claude-sonnet';
-    const validModels: LLMModel[] = ['claude-sonnet', 'claude-opus', 'gemini-flash', 'cerebras-qwen'];
-    if (!validModels.includes(llmModel)) {
-      return Response.json(
-        { success: false, error: `Invalid model: ${modelParam}. Valid options: ${validModels.join(', ')}`, code: 'INVALID_REQUEST' },
-        { status: 400, headers: corsHeaders(env) }
-      );
-    }
-
-    // Check if model is available
-    if (!isModelAvailable(llmModel, env)) {
-      return Response.json(
-        { success: false, error: `Model ${getModelDisplayName(llmModel)} is not configured. Check API keys.`, code: 'INTERNAL_ERROR' },
-        { status: 500, headers: corsHeaders(env) }
-      );
-    }
 
     // Validate required fields with specific messages
     const missing: string[] = [];
@@ -1663,6 +1642,15 @@ async function handleBlockGenerate(request: Request, env: Env): Promise<Response
       return Response.json(
         { success: false, error: `Missing required fields: ${missing.join(', ')}`, code: 'INVALID_REQUEST' },
         { status: 400, headers: corsHeaders(env) }
+      );
+    }
+
+    // Get Anthropic config
+    const anthropicConfig = getAnthropicConfig(env);
+    if (!anthropicConfig) {
+      return Response.json(
+        { success: false, error: 'Anthropic API not configured', code: 'INTERNAL_ERROR' },
+        { status: 500, headers: corsHeaders(env) }
       );
     }
 
@@ -1764,16 +1752,15 @@ async function handleBlockGenerate(request: Request, env: Env): Promise<Response
     }
 
     // Generate block using the enhanced generator
-    console.log(`Generating block with ${getModelDisplayName(llmModel)}... (mediaType=${screenshotMediaType})`);
+    console.log(`Generating block with Claude Vision... (mediaType=${screenshotMediaType})`);
     const enhancedBlock = await generateBlockEnhanced(
       screenshotBase64,
       html,
       url,
-      env,
+      anthropicConfig,
       extractedCssStyles,
       liveImages,
-      screenshotMediaType,
-      llmModel
+      screenshotMediaType
     );
 
     // Build response
@@ -1817,25 +1804,6 @@ async function handleBlockRefine(request: Request, env: Env): Promise<Response> 
     const blockJs = formData.get('blockJs') as string;
     const blockName = formData.get('blockName') as string || 'refined-block';
     const refinePrompt = formData.get('prompt') as string;
-    const modelParam = formData.get('model') as string;
-
-    // Parse and validate model parameter
-    const llmModel: LLMModel = (modelParam as LLMModel) || 'claude-sonnet';
-    const validModels: LLMModel[] = ['claude-sonnet', 'claude-opus', 'gemini-flash', 'cerebras-qwen'];
-    if (!validModels.includes(llmModel)) {
-      return Response.json(
-        { success: false, error: `Invalid model: ${modelParam}. Valid options: ${validModels.join(', ')}`, code: 'INVALID_REQUEST' },
-        { status: 400, headers: corsHeaders(env) }
-      );
-    }
-
-    // Check if model is available
-    if (!isModelAvailable(llmModel, env)) {
-      return Response.json(
-        { success: false, error: `Model ${getModelDisplayName(llmModel)} is not configured. Check API keys.`, code: 'INTERNAL_ERROR' },
-        { status: 500, headers: corsHeaders(env) }
-      );
-    }
 
     // Validate required fields - html OR xpath must be provided
     const missing: string[] = [];
@@ -1850,6 +1818,15 @@ async function handleBlockRefine(request: Request, env: Env): Promise<Response> 
       return Response.json(
         { success: false, error: `Missing required fields: ${missing.join(', ')}`, code: 'INVALID_REQUEST' },
         { status: 400, headers: corsHeaders(env) }
+      );
+    }
+
+    // Get Anthropic config
+    const anthropicConfig = getAnthropicConfig(env);
+    if (!anthropicConfig) {
+      return Response.json(
+        { success: false, error: 'Anthropic API not configured', code: 'INTERNAL_ERROR' },
+        { status: 500, headers: corsHeaders(env) }
       );
     }
 
@@ -1906,15 +1883,13 @@ async function handleBlockRefine(request: Request, env: Env): Promise<Response> 
       }
     }
     try {
-      console.log(`Refining block with ${getModelDisplayName(llmModel)}...`);
       const result = await refineBlock(
         browser,
         originalScreenshotBase64,
         currentBlock,
-        env,
+        anthropicConfig,
         { width: 1440, height: 900 },
-        refinePrompt || undefined,
-        llmModel
+        refinePrompt || undefined
       );
 
       // Build response
@@ -2189,15 +2164,6 @@ function handleBlockTestUI(env: Env): Response {
           <input type="file" id="screenshot" accept="image/png">
         </div>
         <div class="form-group">
-          <label for="model">LLM Model</label>
-          <select id="model" style="width: 100%; padding: 10px; border: 1px solid #ddd; border-radius: 4px; font-size: 14px;">
-            <option value="claude-sonnet">Claude Sonnet 4</option>
-            <option value="claude-opus">Claude Opus 4</option>
-            <option value="gemini-flash">Gemini 2.0 Flash</option>
-            <option value="cerebras-qwen">Cerebras Qwen 3</option>
-          </select>
-        </div>
-        <div class="form-group">
           <label for="xpath">Element XPath (optional - alternative to HTML)</label>
           <input type="text" id="xpath" placeholder="/html/body/div[1]/section[2]">
         </div>
@@ -2341,9 +2307,7 @@ function handleBlockTestUI(env: Env): Response {
   </style>
 </head>
 <body>
-  <main>
-    \${currentBlock.html}
-  </main>
+  \${currentBlock.html}
   <script>
     \${jsCode}
     // Auto-run decorate if it exists (EDS blocks export a decorate function)
@@ -2371,22 +2335,19 @@ function handleBlockTestUI(env: Env): Response {
       const screenshot = document.getElementById('screenshot').files[0];
       const html = document.getElementById('html').value;
       const xpath = document.getElementById('xpath').value;
-      const model = document.getElementById('model').value;
 
       if (!url || !screenshot || (!html && !xpath)) {
         setStatus('Please provide URL, screenshot, and either HTML or XPath', 'error');
         return;
       }
 
-      const modelName = document.getElementById('model').options[document.getElementById('model').selectedIndex].text;
-      setStatus('Generating block with ' + modelName + '...', 'loading');
+      setStatus('Generating block...', 'loading');
       document.getElementById('generateBtn').disabled = true;
 
       try {
         const formData = new FormData();
         formData.append('url', url);
         formData.append('screenshot', screenshot);
-        formData.append('model', model);
         if (html) formData.append('html', html);
         if (xpath) formData.append('xpath', xpath);
 
@@ -2444,17 +2405,14 @@ function handleBlockTestUI(env: Env): Response {
       const html = document.getElementById('html').value;
       const xpath = document.getElementById('xpath').value;
       const refinePrompt = document.getElementById('refinePrompt').value;
-      const model = document.getElementById('model').value;
 
-      const modelName = document.getElementById('model').options[document.getElementById('model').selectedIndex].text;
-      setStatus('Refining block with ' + modelName + ' (iteration ' + (iterations + 1) + ')...', 'loading');
+      setStatus('Refining block (iteration ' + (iterations + 1) + ')...', 'loading');
       document.getElementById('refineBtn').disabled = true;
 
       try {
         const formData = new FormData();
         formData.append('url', url);
         formData.append('screenshot', originalScreenshot);
-        formData.append('model', model);
         if (html) formData.append('html', html);
         if (xpath) formData.append('xpath', xpath);
         if (refinePrompt) formData.append('prompt', refinePrompt);
