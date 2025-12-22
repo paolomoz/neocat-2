@@ -13,3 +13,4 @@ helix-importer-ui
 *.bak
 .idea
 .env
+.env.swp

@@ -74,7 +74,7 @@ function generateBlockName(extracted: ExtractedBlock): string {
 function generateHTML(blockName: string, extracted: ExtractedBlock): string {
   const lines: string[] = [];
 
-  lines.push(`<div class="${blockName} block">`);
+  lines.push(`<div class="${blockName}">`);
 
   // Add title row if present
   if (extracted.title) {

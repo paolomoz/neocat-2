@@ -375,7 +375,7 @@ ${cssSection}
 
 HTML structure:
 \`\`\`html
-<div class="{block-name} block">
+<div class="{block-name}">
   <div><!-- row 1 -->
     <div><!-- cell 1 --></div>
     <div><!-- cell 2 --></div>

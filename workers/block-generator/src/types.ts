@@ -121,7 +121,11 @@ export type ErrorCode =
   | 'PARSE_ERROR'
   | 'ANALYSIS_FAILED'
   | 'GENERATION_FAILED'
-  | 'INTERNAL_ERROR';
+  | 'INTERNAL_ERROR'
+  | 'GITHUB_API_ERROR'
+  | 'GITHUB_AUTH_FAILED'
+  | 'DA_API_ERROR'
+  | 'DA_AUTH_FAILED';
 
 // Custom error class
 export class BlockGeneratorError extends Error {
@@ -147,4 +151,46 @@ export interface Env {
   ANTHROPIC_MODEL?: string;
   // Cloudflare Browser Rendering
   BROWSER?: Fetcher;
+  // DA Service Account (Adobe IMS OAuth)
+  DA_CLIENT_ID?: string;
+  DA_CLIENT_SECRET?: string;
+  DA_SERVICE_TOKEN?: string;
+}
+
+// GitHub Push Request/Response
+export interface GitHubPushRequest {
+  owner: string;
+  repo: string;
+  blockName: string;
+  js: string;
+  css: string;
+  token: string;
+  branch?: string;
+  siteUrl?: string; // Website URL to generate branch name (e.g., "www.researchaffiliates.com")
+  commitMessage?: string;
+}
+
+export interface GitHubPushResponse {
+  success: true;
+  commitUrl: string;
+  jsPath: string;
+  cssPath: string;
+  commitSha: string;
+  branch: string;
+}
+
+// DA Admin Create Page Request/Response
+export interface DACreatePageRequest {
+  org: string;
+  site: string;
+  path: string;
+  html: string;
+  token?: string; // Optional - if not provided, uses service account from env
+}
+
+export interface DACreatePageResponse {
+  success: true;
+  pageUrl: string;
+  previewUrl: string;
+  path: string;
 }

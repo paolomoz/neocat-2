@@ -422,7 +422,7 @@ Generate a complete EDS block that visually matches the screenshot. Pay close at
 ## EDS Block Structure Requirements
 EDS blocks follow this HTML pattern:
 \`\`\`html
-<div class="{block-name} block">
+<div class="{block-name}">
   <div><!-- row 1 -->
     <div><!-- cell 1 --></div>
     <div><!-- cell 2 --></div>

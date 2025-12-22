@@ -385,7 +385,7 @@ function buildBlockHTML(
   const lines: string[] = [];
 
   // Block wrapper
-  lines.push(`<div class="${blockName} block">`);
+  lines.push(`<div class="${blockName}">`);
 
   // Add rows
   for (const row of rows) {
