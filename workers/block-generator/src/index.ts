@@ -4,6 +4,10 @@ import {
   ErrorResponse,
   BlockGeneratorError,
   Env,
+  GitHubPushRequest,
+  GitHubPushResponse,
+  DACreatePageRequest,
+  DACreatePageResponse,
 } from './types';
 import { fetchPage } from './fetcher';
 import { parseHTMLDocument, getElement } from './parser';
@@ -272,6 +276,16 @@ export default {
       return handleBlockWinner(request, env);
     }
 
+    // Block GitHub endpoint (push block code to GitHub repo)
+    if (url.pathname === '/block-github' && request.method === 'POST') {
+      return handleBlockGitHub(request, env);
+    }
+
+    // Block DA endpoint (create page in DA Admin)
+    if (url.pathname === '/block-da' && request.method === 'POST') {
+      return handleBlockDA(request, env);
+    }
+
     // Debug endpoint to check config
     if (url.pathname === '/debug-config' && request.method === 'GET') {
       return Response.json({
@@ -288,6 +302,11 @@ export default {
     // Test UI for block-generate and block-refine
     if (url.pathname === '/test' && request.method === 'GET') {
       return handleBlockTestUI(env);
+    }
+
+    // Test UI for block-github and block-da
+    if (url.pathname === '/test-save' && request.method === 'GET') {
+      return handleSaveTestUI(env);
     }
 
     // 404 for unknown routes
@@ -767,7 +786,7 @@ ${imageRefList}
 
 EDS blocks have this structure before decoration:
 \`\`\`html
-<div class="{block-name} block">
+<div class="{block-name}">
   <div><!-- row 1 -->
     <div><!-- cell 1 --></div>
     <div><!-- cell 2 --></div>
@@ -2354,6 +2373,102 @@ function handleBlockTestUI(env: Env): Response {
     button.winner:hover {
       background: #7722aa;
     }
+    button.save-github {
+      background: #24292e;
+    }
+    button.save-github:hover {
+      background: #1a1e22;
+    }
+    button.save-da {
+      background: #eb1000;
+    }
+    button.save-da:hover {
+      background: #c40d00;
+    }
+    .save-modal {
+      display: none;
+      position: fixed;
+      top: 0;
+      left: 0;
+      right: 0;
+      bottom: 0;
+      background: rgba(0,0,0,0.5);
+      z-index: 1000;
+      align-items: center;
+      justify-content: center;
+    }
+    .save-modal.active {
+      display: flex;
+    }
+    .save-modal-content {
+      background: white;
+      border-radius: 12px;
+      padding: 24px;
+      max-width: 500px;
+      width: 90%;
+      max-height: 80vh;
+      overflow-y: auto;
+    }
+    .save-modal h3 {
+      margin: 0 0 20px 0;
+      display: flex;
+      align-items: center;
+      gap: 10px;
+    }
+    .save-modal .form-group {
+      margin-bottom: 15px;
+    }
+    .save-modal .form-group label {
+      display: block;
+      margin-bottom: 5px;
+      font-weight: 500;
+      color: #555;
+    }
+    .save-modal .form-group input {
+      width: 100%;
+      padding: 10px;
+      border: 1px solid #ddd;
+      border-radius: 4px;
+    }
+    .save-modal .row {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 10px;
+    }
+    .save-modal .button-row {
+      display: flex;
+      gap: 10px;
+      margin-top: 20px;
+    }
+    .save-modal button {
+      flex: 1;
+    }
+    .save-modal button.cancel {
+      background: #6c757d;
+    }
+    .save-result {
+      margin-top: 15px;
+      padding: 12px;
+      border-radius: 6px;
+      font-size: 13px;
+      display: none;
+    }
+    .save-result.success {
+      display: block;
+      background: #d4edda;
+      border: 1px solid #28a745;
+      color: #155724;
+    }
+    .save-result.error {
+      display: block;
+      background: #f8d7da;
+      border: 1px solid #dc3545;
+      color: #721c24;
+    }
+    .save-result a {
+      color: inherit;
+      font-weight: 500;
+    }
     .winner-result {
       margin-top: 15px;
       padding: 15px;
@@ -2405,6 +2520,7 @@ function handleBlockTestUI(env: Env): Response {
     }
     .button-group {
       display: flex;
+      flex-wrap: wrap;
       gap: 10px;
       margin-top: 15px;
     }
@@ -2656,6 +2772,8 @@ function handleBlockTestUI(env: Env): Response {
           <button id="generateBtn" onclick="generate()">Generate Block</button>
           <button id="refineBtn" class="refine" onclick="refine()" disabled>Refine</button>
           <button id="winnerBtn" class="winner" onclick="pickWinner()" disabled>Pick Winner</button>
+          <button id="saveGithubBtn" class="save-github" onclick="openGithubModal()" disabled>Save to GitHub</button>
+          <button id="saveDaBtn" class="save-da" onclick="openDaModal()" disabled>Save to DA</button>
           <span class="iteration-count" id="iterationCount"></span>
         </div>
         <div id="status" class="status" style="display: none;"></div>
@@ -2725,6 +2843,62 @@ function handleBlockTestUI(env: Env): Response {
             </div>
           </div>
         </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- GitHub Save Modal -->
+  <div id="githubModal" class="save-modal" onclick="if(event.target===this)closeModals()">
+    <div class="save-modal-content">
+      <h3>🐙 Save to GitHub</h3>
+      <div class="row">
+        <div class="form-group">
+          <label>Owner</label>
+          <input type="text" id="gh-owner" value="paolomoz">
+        </div>
+        <div class="form-group">
+          <label>Repo</label>
+          <input type="text" id="gh-repo" value="neocat-2">
+        </div>
+      </div>
+      <div class="form-group">
+        <label>Site URL (for branch name)</label>
+        <input type="text" id="gh-siteUrl" placeholder="https://www.example.com">
+      </div>
+      <div class="form-group">
+        <label>GitHub Token</label>
+        <input type="password" id="gh-token" placeholder="ghp_...">
+      </div>
+      <div id="gh-result" class="save-result"></div>
+      <div class="button-row">
+        <button class="cancel" onclick="closeModals()">Cancel</button>
+        <button class="save-github" onclick="saveToGithub()">Push to GitHub</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- DA Save Modal -->
+  <div id="daModal" class="save-modal" onclick="if(event.target===this)closeModals()">
+    <div class="save-modal-content">
+      <h3>📄 Save to DA</h3>
+      <div class="row">
+        <div class="form-group">
+          <label>Organization</label>
+          <input type="text" id="da-org" value="paolomoz">
+        </div>
+        <div class="form-group">
+          <label>Site</label>
+          <input type="text" id="da-site" value="neocat-2">
+        </div>
+      </div>
+      <div class="form-group">
+        <label>Path</label>
+        <input type="text" id="da-path" value="/drafts/generated-block">
+      </div>
+      <div id="da-result" class="save-result"></div>
+      <div class="button-row">
+        <button class="cancel" onclick="closeModals()">Cancel</button>
+        <button class="save-da" onclick="saveToDa()">Save to DA</button>
       </div>
     </div>
   </div>
@@ -2835,16 +3009,22 @@ function handleBlockTestUI(env: Env): Response {
         document.getElementById('generatedJs').textContent = block.js;
         document.getElementById('iterationCount').textContent = 'Option ' + (activeOption + 1) + ' / v' + (activeIteration + 1);
         document.getElementById('refineBtn').disabled = isGenerating;
+        document.getElementById('saveGithubBtn').disabled = false;
+        document.getElementById('saveDaBtn').disabled = false;
       } else if (block && block.loading) {
         document.getElementById('generatedHtml').textContent = 'Generating...';
         document.getElementById('generatedCss').textContent = '';
         document.getElementById('generatedJs').textContent = '';
         document.getElementById('refineBtn').disabled = true;
+        document.getElementById('saveGithubBtn').disabled = true;
+        document.getElementById('saveDaBtn').disabled = true;
       } else {
         document.getElementById('generatedHtml').textContent = 'No block generated yet';
         document.getElementById('generatedCss').textContent = '';
         document.getElementById('generatedJs').textContent = '';
         document.getElementById('refineBtn').disabled = true;
+        document.getElementById('saveGithubBtn').disabled = true;
+        document.getElementById('saveDaBtn').disabled = true;
       }
     }
 
@@ -3240,6 +3420,122 @@ function handleBlockTestUI(env: Env): Response {
         document.getElementById('winnerBtn').disabled = false;
       }
     }
+
+    function closeModals() {
+      document.getElementById('githubModal').classList.remove('active');
+      document.getElementById('daModal').classList.remove('active');
+      document.getElementById('gh-result').className = 'save-result';
+      document.getElementById('da-result').className = 'save-result';
+    }
+
+    function openGithubModal() {
+      const currentBlock = blocks[activeOption][activeIteration];
+      if (!currentBlock || currentBlock.loading) return;
+
+      // Pre-fill site URL from input
+      const siteUrl = document.getElementById('url').value;
+      if (siteUrl) document.getElementById('gh-siteUrl').value = siteUrl;
+
+      document.getElementById('gh-result').className = 'save-result';
+      document.getElementById('githubModal').classList.add('active');
+    }
+
+    function openDaModal() {
+      const currentBlock = blocks[activeOption][activeIteration];
+      if (!currentBlock || currentBlock.loading) return;
+
+      // Pre-fill path with block name
+      const blockName = currentBlock.blockName || 'generated-block';
+      document.getElementById('da-path').value = '/drafts/' + blockName;
+
+      document.getElementById('da-result').className = 'save-result';
+      document.getElementById('daModal').classList.add('active');
+    }
+
+    async function saveToGithub() {
+      const currentBlock = blocks[activeOption][activeIteration];
+      if (!currentBlock || currentBlock.loading) return;
+
+      const result = document.getElementById('gh-result');
+      const btn = document.querySelector('#githubModal .save-github');
+      btn.disabled = true;
+      btn.textContent = 'Pushing...';
+
+      try {
+        const body = {
+          owner: document.getElementById('gh-owner').value,
+          repo: document.getElementById('gh-repo').value,
+          blockName: currentBlock.blockName || 'my-block',
+          js: currentBlock.js,
+          css: currentBlock.css,
+          token: document.getElementById('gh-token').value,
+        };
+
+        const siteUrl = document.getElementById('gh-siteUrl').value;
+        if (siteUrl) body.siteUrl = siteUrl;
+
+        const res = await fetch('/block-github', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(body)
+        });
+
+        const data = await res.json();
+
+        if (data.success) {
+          result.className = 'save-result success';
+          result.innerHTML = 'Pushed to branch <strong>' + data.branch + '</strong>! <a href="' + data.commitUrl + '" target="_blank">View commit →</a>';
+        } else {
+          result.className = 'save-result error';
+          result.textContent = 'Error: ' + data.error;
+        }
+      } catch (err) {
+        result.className = 'save-result error';
+        result.textContent = 'Error: ' + err.message;
+      }
+
+      btn.disabled = false;
+      btn.textContent = 'Push to GitHub';
+    }
+
+    async function saveToDa() {
+      const currentBlock = blocks[activeOption][activeIteration];
+      if (!currentBlock || currentBlock.loading) return;
+
+      const result = document.getElementById('da-result');
+      const btn = document.querySelector('#daModal .save-da');
+      btn.disabled = true;
+      btn.textContent = 'Saving...';
+
+      try {
+        const res = await fetch('/block-da', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            org: document.getElementById('da-org').value,
+            site: document.getElementById('da-site').value,
+            path: document.getElementById('da-path').value,
+            html: currentBlock.html,
+          })
+        });
+
+        const data = await res.json();
+
+        if (data.success) {
+          result.className = 'save-result success';
+          result.innerHTML = 'Saved! <a href="' + data.pageUrl + '" target="_blank">Open in DA →</a> | <a href="' + data.previewUrl + '" target="_blank">Preview →</a>';
+        } else {
+          result.className = 'save-result error';
+          result.textContent = 'Error: ' + data.error;
+        }
+      } catch (err) {
+        result.className = 'save-result error';
+        result.textContent = 'Error: ' + err.message;
+      }
+
+      btn.disabled = false;
+      btn.textContent = 'Save to DA';
+    }
   </script>
 </body>
 </html>`;
@@ -3248,6 +3544,354 @@ function handleBlockTestUI(env: Env): Response {
     status: 200,
     headers: {
       'Access-Control-Allow-Origin': env.ALLOWED_ORIGINS || '*',
+      'Content-Type': 'text/html; charset=utf-8',
+    },
+  });
+}
+
+/**
+ * Returns the test UI HTML page for block-github and block-da
+ */
+function handleSaveTestUI(env: Env): Response {
+  const html = `<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Block Save Test UI</title>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+      background: linear-gradient(135deg, #1a1a2e 0%, #16213e 100%);
+      min-height: 100vh;
+      padding: 20px;
+      color: #fff;
+    }
+    .container { max-width: 1200px; margin: 0 auto; }
+    h1 { margin-bottom: 10px; font-size: 28px; }
+    .subtitle { color: #888; margin-bottom: 30px; }
+    .panels { display: grid; grid-template-columns: 1fr 1fr; gap: 20px; }
+    @media (max-width: 900px) { .panels { grid-template-columns: 1fr; } }
+    .panel {
+      background: rgba(255,255,255,0.05);
+      border: 1px solid rgba(255,255,255,0.1);
+      border-radius: 12px;
+      padding: 24px;
+    }
+    .panel h2 {
+      margin-bottom: 20px;
+      font-size: 18px;
+      display: flex;
+      align-items: center;
+      gap: 10px;
+    }
+    .panel h2 .icon { font-size: 24px; }
+    .form-group { margin-bottom: 16px; }
+    label {
+      display: block;
+      margin-bottom: 6px;
+      font-size: 13px;
+      color: #aaa;
+      font-weight: 500;
+    }
+    input, textarea {
+      width: 100%;
+      padding: 12px;
+      background: rgba(0,0,0,0.3);
+      border: 1px solid rgba(255,255,255,0.15);
+      border-radius: 8px;
+      color: #fff;
+      font-size: 14px;
+    }
+    input:focus, textarea:focus {
+      outline: none;
+      border-color: #4CAF50;
+    }
+    textarea {
+      min-height: 120px;
+      font-family: 'Monaco', 'Menlo', monospace;
+      font-size: 12px;
+    }
+    button {
+      width: 100%;
+      padding: 14px;
+      border: none;
+      border-radius: 8px;
+      font-size: 15px;
+      font-weight: 600;
+      cursor: pointer;
+      transition: transform 0.1s, box-shadow 0.2s;
+    }
+    button:hover { transform: translateY(-1px); }
+    button:active { transform: translateY(0); }
+    button:disabled { opacity: 0.5; cursor: not-allowed; transform: none; }
+    .btn-github {
+      background: linear-gradient(135deg, #24292e 0%, #1a1e22 100%);
+      color: white;
+      border: 1px solid #444;
+    }
+    .btn-da {
+      background: linear-gradient(135deg, #eb1000 0%, #c40d00 100%);
+      color: white;
+    }
+    .result {
+      margin-top: 16px;
+      padding: 16px;
+      border-radius: 8px;
+      font-size: 13px;
+      display: none;
+    }
+    .result.success {
+      display: block;
+      background: rgba(76, 175, 80, 0.2);
+      border: 1px solid #4CAF50;
+    }
+    .result.error {
+      display: block;
+      background: rgba(244, 67, 54, 0.2);
+      border: 1px solid #f44336;
+    }
+    .result a {
+      color: #4CAF50;
+      text-decoration: none;
+    }
+    .result a:hover { text-decoration: underline; }
+    pre {
+      background: rgba(0,0,0,0.3);
+      padding: 12px;
+      border-radius: 6px;
+      overflow-x: auto;
+      margin-top: 10px;
+      font-size: 11px;
+    }
+    .row { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <h1>Block Save Test UI</h1>
+    <p class="subtitle">Test /block-github and /block-da endpoints</p>
+
+    <div class="panels">
+      <!-- GitHub Panel -->
+      <div class="panel">
+        <h2><span class="icon">&#128025;</span> Push to GitHub</h2>
+        <form id="github-form">
+          <div class="row">
+            <div class="form-group">
+              <label>Owner</label>
+              <input type="text" id="gh-owner" value="paolomoz" required>
+            </div>
+            <div class="form-group">
+              <label>Repo</label>
+              <input type="text" id="gh-repo" value="neocat-2" required>
+            </div>
+          </div>
+          <div class="form-group">
+            <label>Site URL (generates branch name)</label>
+            <input type="text" id="gh-siteUrl" placeholder="https://www.example.com">
+          </div>
+          <div class="form-group">
+            <label>Block Name</label>
+            <input type="text" id="gh-blockName" value="my-block" required>
+          </div>
+          <div class="form-group">
+            <label>JavaScript</label>
+            <textarea id="gh-js" required>export default function decorate(block) {
+  block.classList.add('decorated');
+  console.log('Block decorated!');
+}</textarea>
+          </div>
+          <div class="form-group">
+            <label>CSS</label>
+            <textarea id="gh-css" required>.my-block {
+  padding: 2rem;
+  background: #f5f5f5;
+  border-radius: 8px;
+}</textarea>
+          </div>
+          <div class="form-group">
+            <label>GitHub Token</label>
+            <input type="password" id="gh-token" required>
+          </div>
+          <button type="submit" class="btn-github">Push to GitHub</button>
+          <div id="gh-result" class="result"></div>
+        </form>
+      </div>
+
+      <!-- DA Panel -->
+      <div class="panel">
+        <h2><span class="icon">&#128196;</span> Save to DA</h2>
+        <form id="da-form">
+          <div class="row">
+            <div class="form-group">
+              <label>Organization</label>
+              <input type="text" id="da-org" value="paolomoz" required>
+            </div>
+            <div class="form-group">
+              <label>Site</label>
+              <input type="text" id="da-site" value="neocat-2" required>
+            </div>
+          </div>
+          <div class="form-group">
+            <label>Path</label>
+            <input type="text" id="da-path" value="/drafts/test-block" required>
+          </div>
+          <div class="form-group">
+            <label>HTML Content</label>
+            <textarea id="da-html" required><body>
+<header></header>
+<main>
+  <div>
+    <div class="my-block">
+      <div>
+        <div>
+          <h1>Hello World</h1>
+          <p>This is a test block.</p>
+        </div>
+      </div>
+    </div>
+  </div>
+</main>
+<footer></footer>
+</body></textarea>
+          </div>
+          <button type="submit" class="btn-da">Save to DA</button>
+          <div id="da-result" class="result"></div>
+        </form>
+      </div>
+    </div>
+  </div>
+
+  <script>
+    const API_BASE = '';
+
+    // Check for pre-filled data from /test page
+    (function loadDataFromUrl() {
+      const params = new URLSearchParams(window.location.search);
+      const encodedData = params.get('data');
+      if (encodedData) {
+        try {
+          const data = JSON.parse(decodeURIComponent(escape(atob(encodedData))));
+
+          // Pre-fill GitHub form
+          if (data.blockName) document.getElementById('gh-blockName').value = data.blockName;
+          if (data.js) document.getElementById('gh-js').value = data.js;
+          if (data.css) document.getElementById('gh-css').value = data.css;
+          if (data.siteUrl) document.getElementById('gh-siteUrl').value = data.siteUrl;
+
+          // Pre-fill DA form with the HTML
+          if (data.html) document.getElementById('da-html').value = data.html;
+
+          // Update CSS block name to match
+          if (data.blockName) {
+            document.getElementById('gh-css').value = data.css.replace(/\\.my-block/g, '.' + data.blockName);
+          }
+        } catch (e) {
+          console.error('Failed to parse data from URL:', e);
+        }
+      }
+    })();
+
+    document.getElementById('github-form').addEventListener('submit', async (e) => {
+      e.preventDefault();
+      const btn = e.target.querySelector('button');
+      const result = document.getElementById('gh-result');
+      btn.disabled = true;
+      btn.textContent = 'Pushing...';
+      result.className = 'result';
+
+      try {
+        const body = {
+          owner: document.getElementById('gh-owner').value,
+          repo: document.getElementById('gh-repo').value,
+          blockName: document.getElementById('gh-blockName').value,
+          js: document.getElementById('gh-js').value,
+          css: document.getElementById('gh-css').value,
+          token: document.getElementById('gh-token').value,
+        };
+
+        const siteUrl = document.getElementById('gh-siteUrl').value;
+        if (siteUrl) body.siteUrl = siteUrl;
+
+        const res = await fetch(API_BASE + '/block-github', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(body)
+        });
+
+        const data = await res.json();
+
+        if (data.success) {
+          result.className = 'result success';
+          result.innerHTML = \`
+            <strong>Success!</strong><br>
+            Branch: <code>\${data.branch}</code><br>
+            <a href="\${data.commitUrl}" target="_blank">View Commit &rarr;</a>
+            <pre>\${JSON.stringify(data, null, 2)}</pre>
+          \`;
+        } else {
+          result.className = 'result error';
+          result.innerHTML = \`<strong>Error:</strong> \${data.error}<pre>\${JSON.stringify(data, null, 2)}</pre>\`;
+        }
+      } catch (err) {
+        result.className = 'result error';
+        result.innerHTML = \`<strong>Error:</strong> \${err.message}\`;
+      }
+
+      btn.disabled = false;
+      btn.textContent = 'Push to GitHub';
+    });
+
+    document.getElementById('da-form').addEventListener('submit', async (e) => {
+      e.preventDefault();
+      const btn = e.target.querySelector('button');
+      const result = document.getElementById('da-result');
+      btn.disabled = true;
+      btn.textContent = 'Saving...';
+      result.className = 'result';
+
+      try {
+        const res = await fetch(API_BASE + '/block-da', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            org: document.getElementById('da-org').value,
+            site: document.getElementById('da-site').value,
+            path: document.getElementById('da-path').value,
+            html: document.getElementById('da-html').value,
+          })
+        });
+
+        const data = await res.json();
+
+        if (data.success) {
+          result.className = 'result success';
+          result.innerHTML = \`
+            <strong>Success!</strong><br>
+            <a href="\${data.pageUrl}" target="_blank">Open in DA &rarr;</a><br>
+            <a href="\${data.previewUrl}" target="_blank">Preview &rarr;</a>
+            <pre>\${JSON.stringify(data, null, 2)}</pre>
+          \`;
+        } else {
+          result.className = 'result error';
+          result.innerHTML = \`<strong>Error:</strong> \${data.error}<pre>\${JSON.stringify(data, null, 2)}</pre>\`;
+        }
+      } catch (err) {
+        result.className = 'result error';
+        result.innerHTML = \`<strong>Error:</strong> \${err.message}\`;
+      }
+
+      btn.disabled = false;
+      btn.textContent = 'Save to DA';
+    });
+  </script>
+</body>
+</html>`;
+
+  return new Response(html, {
+    headers: {
       'Content-Type': 'text/html; charset=utf-8',
     },
   });
@@ -4196,6 +4840,503 @@ async function parseRequestBody(request: Request): Promise<BlockRequest> {
     yStart: parsedYStart,
     yEnd: parsedYEnd,
   };
+}
+
+/**
+ * Generate a readable branch name from a website URL
+ * e.g., "https://www.researchaffiliates.com/path" -> "researchaffiliates"
+ * e.g., "https://www.wknd-trendsetters.site/" -> "wknd-trendsetters"
+ * Note: EDS does not support subbranches (e.g., "site/name"), so we use flat branch names
+ */
+function generateBranchNameFromUrl(siteUrl: string): string {
+  try {
+    // Parse the URL (add protocol if missing)
+    const urlStr = siteUrl.startsWith('http') ? siteUrl : `https://${siteUrl}`;
+    const url = new URL(urlStr);
+
+    // Get hostname and remove www. prefix
+    let hostname = url.hostname.toLowerCase();
+    if (hostname.startsWith('www.')) {
+      hostname = hostname.slice(4);
+    }
+
+    // Remove TLD (.com, .site, .org, etc.) and keep the main domain name
+    const parts = hostname.split('.');
+    let siteName: string;
+
+    if (parts.length >= 2) {
+      // Take everything except the last part (TLD)
+      // For "researchaffiliates.com" -> "researchaffiliates"
+      // For "sub.domain.co.uk" -> "sub-domain-co"
+      siteName = parts.slice(0, -1).join('-');
+    } else {
+      siteName = hostname;
+    }
+
+    // Sanitize: only alphanumeric and hyphens, no double hyphens
+    siteName = siteName.replace(/[^a-z0-9-]/g, '-').replace(/-+/g, '-').replace(/^-|-$/g, '');
+
+    return siteName;
+  } catch {
+    // If URL parsing fails, create a safe branch name from the input
+    const safeName = siteUrl.toLowerCase()
+      .replace(/^https?:\/\//, '')
+      .replace(/^www\./, '')
+      .replace(/[^a-z0-9]/g, '-')
+      .replace(/-+/g, '-')
+      .replace(/^-|-$/g, '')
+      .slice(0, 50);
+    return safeName || 'unknown';
+  }
+}
+
+/**
+ * Handles the /block-github endpoint
+ * Pushes generated block code (JS, CSS) to a user's GitHub repository in a single commit
+ */
+async function handleBlockGitHub(request: Request, env: Env): Promise<Response> {
+  try {
+    const body = await request.json() as GitHubPushRequest;
+
+    // Validate required fields
+    const missing: string[] = [];
+    if (!body.owner) missing.push('owner');
+    if (!body.repo) missing.push('repo');
+    if (!body.blockName) missing.push('blockName');
+    if (!body.js) missing.push('js');
+    if (!body.css) missing.push('css');
+    if (!body.token) missing.push('token');
+
+    if (missing.length > 0) {
+      throw new BlockGeneratorError(
+        `Missing required fields: ${missing.join(', ')}`,
+        'INVALID_REQUEST',
+        400
+      );
+    }
+
+    // Sanitize block name (lowercase, alphanumeric + hyphens)
+    const blockName = body.blockName.toLowerCase().replace(/\s+/g, '-').replace(/[^a-z0-9-]/g, '');
+
+    // Determine branch: use siteUrl to generate, or explicit branch, or default to main
+    let branch: string;
+    if (body.siteUrl) {
+      branch = generateBranchNameFromUrl(body.siteUrl);
+    } else {
+      branch = body.branch || 'main';
+    }
+
+    // Define file paths
+    const jsPath = `blocks/${blockName}/${blockName}.js`;
+    const cssPath = `blocks/${blockName}/${blockName}.css`;
+
+    // GitHub API headers
+    const githubHeaders: Record<string, string> = {
+      'Accept': 'application/vnd.github+json',
+      'Authorization': `Bearer ${body.token}`,
+      'X-GitHub-Api-Version': '2022-11-28',
+      'User-Agent': 'AEM-Block-Generator-Worker',
+    };
+
+    // Helper for GitHub API calls
+    async function githubFetch(url: string, options?: RequestInit): Promise<Response> {
+      const response = await fetch(url, {
+        ...options,
+        headers: { ...githubHeaders, ...options?.headers },
+      });
+
+      if (response.status === 401 || response.status === 403) {
+        throw new BlockGeneratorError(
+          'GitHub authentication failed. Check your token permissions.',
+          'GITHUB_AUTH_FAILED',
+          401
+        );
+      }
+
+      return response;
+    }
+
+    // Step 1: Get the current commit SHA for the branch (create branch if needed)
+    let currentCommitSha: string;
+
+    const refResponse = await githubFetch(
+      `https://api.github.com/repos/${body.owner}/${body.repo}/git/ref/heads/${branch}`
+    );
+
+    if (refResponse.status === 404 && branch !== 'main') {
+      // Branch doesn't exist, create it from main
+      console.log(`Branch ${branch} not found, creating from main...`);
+
+      // Get main branch SHA
+      const mainRefResponse = await githubFetch(
+        `https://api.github.com/repos/${body.owner}/${body.repo}/git/ref/heads/main`
+      );
+
+      if (!mainRefResponse.ok) {
+        const error = await mainRefResponse.text();
+        throw new BlockGeneratorError(
+          `Failed to get main branch: ${mainRefResponse.status} - ${error}`,
+          'GITHUB_API_ERROR',
+          mainRefResponse.status
+        );
+      }
+
+      const mainRefData = await mainRefResponse.json() as { object: { sha: string } };
+      const mainSha = mainRefData.object.sha;
+
+      // Create new branch from main
+      const createBranchResponse = await githubFetch(
+        `https://api.github.com/repos/${body.owner}/${body.repo}/git/refs`,
+        {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            ref: `refs/heads/${branch}`,
+            sha: mainSha,
+          }),
+        }
+      );
+
+      if (!createBranchResponse.ok) {
+        const error = await createBranchResponse.text();
+        throw new BlockGeneratorError(
+          `Failed to create branch ${branch}: ${createBranchResponse.status} - ${error}`,
+          'GITHUB_API_ERROR',
+          createBranchResponse.status
+        );
+      }
+
+      console.log(`Created branch ${branch} from main`);
+      currentCommitSha = mainSha;
+    } else if (!refResponse.ok) {
+      const error = await refResponse.text();
+      throw new BlockGeneratorError(
+        `Failed to get branch ref: ${refResponse.status} - ${error}`,
+        'GITHUB_API_ERROR',
+        refResponse.status
+      );
+    } else {
+      const refData = await refResponse.json() as { object: { sha: string } };
+      currentCommitSha = refData.object.sha;
+    }
+
+    // Step 2: Get the tree SHA from the current commit
+    const commitResponse = await githubFetch(
+      `https://api.github.com/repos/${body.owner}/${body.repo}/git/commits/${currentCommitSha}`
+    );
+
+    if (!commitResponse.ok) {
+      const error = await commitResponse.text();
+      throw new BlockGeneratorError(
+        `Failed to get commit: ${commitResponse.status} - ${error}`,
+        'GITHUB_API_ERROR',
+        commitResponse.status
+      );
+    }
+
+    const commitData = await commitResponse.json() as { tree: { sha: string } };
+    const baseTreeSha = commitData.tree.sha;
+
+    // Step 3: Create blobs for both files
+    const createBlob = async (content: string): Promise<string> => {
+      const blobResponse = await githubFetch(
+        `https://api.github.com/repos/${body.owner}/${body.repo}/git/blobs`,
+        {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            content: content,
+            encoding: 'utf-8',
+          }),
+        }
+      );
+
+      if (!blobResponse.ok) {
+        const error = await blobResponse.text();
+        throw new BlockGeneratorError(
+          `Failed to create blob: ${blobResponse.status} - ${error}`,
+          'GITHUB_API_ERROR',
+          blobResponse.status
+        );
+      }
+
+      const blobData = await blobResponse.json() as { sha: string };
+      return blobData.sha;
+    };
+
+    const [jsBlobSha, cssBlobSha] = await Promise.all([
+      createBlob(body.js),
+      createBlob(body.css),
+    ]);
+
+    // Step 4: Create a new tree with both files
+    const treeResponse = await githubFetch(
+      `https://api.github.com/repos/${body.owner}/${body.repo}/git/trees`,
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          base_tree: baseTreeSha,
+          tree: [
+            {
+              path: jsPath,
+              mode: '100644',
+              type: 'blob',
+              sha: jsBlobSha,
+            },
+            {
+              path: cssPath,
+              mode: '100644',
+              type: 'blob',
+              sha: cssBlobSha,
+            },
+          ],
+        }),
+      }
+    );
+
+    if (!treeResponse.ok) {
+      const error = await treeResponse.text();
+      throw new BlockGeneratorError(
+        `Failed to create tree: ${treeResponse.status} - ${error}`,
+        'GITHUB_API_ERROR',
+        treeResponse.status
+      );
+    }
+
+    const treeData = await treeResponse.json() as { sha: string };
+    const newTreeSha = treeData.sha;
+
+    // Step 5: Create a new commit
+    const newCommitResponse = await githubFetch(
+      `https://api.github.com/repos/${body.owner}/${body.repo}/git/commits`,
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          message: body.commitMessage || `Add/update ${blockName} block`,
+          tree: newTreeSha,
+          parents: [currentCommitSha],
+        }),
+      }
+    );
+
+    if (!newCommitResponse.ok) {
+      const error = await newCommitResponse.text();
+      throw new BlockGeneratorError(
+        `Failed to create commit: ${newCommitResponse.status} - ${error}`,
+        'GITHUB_API_ERROR',
+        newCommitResponse.status
+      );
+    }
+
+    const newCommitData = await newCommitResponse.json() as { sha: string };
+    const newCommitSha = newCommitData.sha;
+
+    // Step 6: Update the branch reference to point to the new commit
+    const updateRefResponse = await githubFetch(
+      `https://api.github.com/repos/${body.owner}/${body.repo}/git/refs/heads/${branch}`,
+      {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          sha: newCommitSha,
+        }),
+      }
+    );
+
+    if (!updateRefResponse.ok) {
+      const error = await updateRefResponse.text();
+      throw new BlockGeneratorError(
+        `Failed to update branch ref: ${updateRefResponse.status} - ${error}`,
+        'GITHUB_API_ERROR',
+        updateRefResponse.status
+      );
+    }
+
+    const response: GitHubPushResponse = {
+      success: true,
+      commitUrl: `https://github.com/${body.owner}/${body.repo}/commit/${newCommitSha}`,
+      jsPath: jsPath,
+      cssPath: cssPath,
+      commitSha: newCommitSha,
+      branch: branch,
+    };
+
+    return Response.json(response, { status: 200, headers: corsHeaders(env) });
+  } catch (error) {
+    return handleError(error, env);
+  }
+}
+
+/**
+ * Exchange Adobe IMS credentials for an access token
+ */
+async function exchangeDACredentialsForToken(
+  clientId: string,
+  clientSecret: string,
+  serviceToken: string
+): Promise<string> {
+  const IMS_TOKEN_ENDPOINT = 'https://ims-na1.adobelogin.com/ims/token/v3';
+
+  const formParams = new URLSearchParams();
+  formParams.append('grant_type', 'authorization_code');
+  formParams.append('client_id', clientId);
+  formParams.append('client_secret', clientSecret);
+  formParams.append('code', serviceToken);
+
+  const response = await fetch(IMS_TOKEN_ENDPOINT, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/x-www-form-urlencoded',
+    },
+    body: formParams.toString(),
+  });
+
+  if (!response.ok) {
+    const errorText = await response.text();
+    throw new BlockGeneratorError(
+      `IMS token exchange failed: ${response.status} - ${errorText}`,
+      'DA_AUTH_FAILED',
+      401
+    );
+  }
+
+  const tokenData = await response.json() as { access_token?: string };
+
+  if (!tokenData.access_token) {
+    throw new BlockGeneratorError(
+      'No access token received from IMS',
+      'DA_AUTH_FAILED',
+      401
+    );
+  }
+
+  return tokenData.access_token;
+}
+
+/**
+ * Wrap block HTML in proper EDS page structure for DA
+ * This creates a full page with header, main, and footer sections
+ */
+function wrapBlockInPageStructure(blockHtml: string): string {
+  // Check if the HTML already has proper page structure
+  if (blockHtml.includes('<body') || blockHtml.includes('<main')) {
+    return blockHtml;
+  }
+
+  return `<body>
+  <header></header>
+  <main>
+    <div>
+${blockHtml.split('\n').map(line => '      ' + line).join('\n')}
+    </div>
+  </main>
+  <footer></footer>
+</body>`;
+}
+
+/**
+ * Handles the /block-da endpoint
+ * Creates a new page in Adobe DA Admin (da.live) with block table HTML
+ */
+async function handleBlockDA(request: Request, env: Env): Promise<Response> {
+  try {
+    const body = await request.json() as DACreatePageRequest;
+
+    // Validate required fields (token is optional - can use service account)
+    const missing: string[] = [];
+    if (!body.org) missing.push('org');
+    if (!body.site) missing.push('site');
+    if (!body.path) missing.push('path');
+    if (!body.html) missing.push('html');
+
+    if (missing.length > 0) {
+      throw new BlockGeneratorError(
+        `Missing required fields: ${missing.join(', ')}`,
+        'INVALID_REQUEST',
+        400
+      );
+    }
+
+    // Get token: use provided token or exchange service account credentials
+    let token = body.token;
+    if (!token) {
+      // Check for service account credentials in env
+      if (env.DA_CLIENT_ID && env.DA_CLIENT_SECRET && env.DA_SERVICE_TOKEN) {
+        console.log('No token provided, using service account credentials');
+        token = await exchangeDACredentialsForToken(
+          env.DA_CLIENT_ID,
+          env.DA_CLIENT_SECRET,
+          env.DA_SERVICE_TOKEN
+        );
+      } else {
+        throw new BlockGeneratorError(
+          'No token provided and service account not configured. Provide token or set DA_CLIENT_ID, DA_CLIENT_SECRET, DA_SERVICE_TOKEN.',
+          'DA_AUTH_FAILED',
+          401
+        );
+      }
+    }
+
+    // Normalize path (ensure it starts with / and ends with .html)
+    let path = body.path.startsWith('/') ? body.path : `/${body.path}`;
+    if (!path.endsWith('.html')) {
+      path = `${path}.html`;
+    }
+
+    // DA Admin API endpoint
+    const daUrl = `https://admin.da.live/source/${body.org}/${body.site}${path}`;
+
+    // Wrap block HTML in proper page structure
+    const wrappedHtml = wrapBlockInPageStructure(body.html);
+
+    // Create FormData with HTML content
+    const formData = new FormData();
+    const blob = new Blob([wrappedHtml], { type: 'text/html' });
+    formData.append('data', blob);
+
+    // Make request to DA Admin API
+    const response = await fetch(daUrl, {
+      method: 'PUT',
+      headers: {
+        'Authorization': `Bearer ${token}`,
+      },
+      body: formData,
+    });
+
+    if (response.status === 401 || response.status === 403) {
+      throw new BlockGeneratorError(
+        'DA Admin authentication failed. Check your token.',
+        'DA_AUTH_FAILED',
+        401
+      );
+    }
+
+    if (!response.ok) {
+      const error = await response.text();
+      throw new BlockGeneratorError(
+        `DA Admin API error: ${response.status} - ${error}`,
+        'DA_API_ERROR',
+        response.status
+      );
+    }
+
+    // Construct URLs
+    const pageUrl = `https://da.live/edit#/${body.org}/${body.site}${path.replace('.html', '')}`;
+    const previewUrl = `https://main--${body.site}--${body.org}.aem.page${path.replace('.html', '')}`;
+
+    const result: DACreatePageResponse = {
+      success: true,
+      pageUrl: pageUrl,
+      previewUrl: previewUrl,
+      path: `/${body.org}/${body.site}${path}`,
+    };
+
+    return Response.json(result, { status: 201, headers: corsHeaders(env) });
+  } catch (error) {
+    return handleError(error, env);
+  }
 }
 
 /**
