@@ -6,6 +6,8 @@ workers/block-generator/node_modules/*
 .claude/skills/scrape-webpage/scripts/node_modules/*
 import-work/images/*
 
+workers/block-generator/.wrangler/tmp/*
+
 helix-importer-ui
 .DS_Store
 *.bak

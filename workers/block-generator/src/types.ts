@@ -19,6 +19,10 @@ export interface BlockRequest {
   sectionDescription?: string;
   /** Section name from visual analysis (preferred) */
   sectionName?: string;
+  /** Y-coordinate where section starts (from /analyze) */
+  yStart?: number;
+  /** Y-coordinate where section ends (from /analyze) */
+  yEnd?: number;
 }
 
 export interface BlockResponse {

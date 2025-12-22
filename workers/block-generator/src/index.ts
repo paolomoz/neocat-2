@@ -20,7 +20,193 @@ import { extractComputedStyles, formatStylesForPrompt } from './style-extractor'
 import { detectBlocks, captureBlockScreenshot, DetectedBlock as BBoxBlock, BoundingBox } from './bbox-detector';
 import { detectBlocksHybrid, ClassifiedBlock, HybridDetectionResult } from './hybrid-detector';
 import { analyzePage, PageAnalysisResult, IdentifiedSection } from './page-analyzer';
-import puppeteer from '@cloudflare/puppeteer';
+import { refineBlock, compareScreenshots, renderBlockToScreenshot, BlockCode, DiffResult } from './block-refiner';
+import puppeteer, { Page } from '@cloudflare/puppeteer';
+
+/**
+ * Convert ArrayBuffer to base64 string without stack overflow
+ * Uses chunked approach to handle large files
+ */
+function arrayBufferToBase64(buffer: ArrayBuffer): string {
+  const bytes = new Uint8Array(buffer);
+  const chunkSize = 8192;
+  let binary = '';
+  for (let i = 0; i < bytes.length; i += chunkSize) {
+    const chunk = bytes.subarray(i, Math.min(i + chunkSize, bytes.length));
+    binary += String.fromCharCode.apply(null, Array.from(chunk));
+  }
+  return btoa(binary);
+}
+
+/**
+ * Compress a large image using Puppeteer canvas
+ * Claude has a 5MB limit, so we resize images > 4MB to be safe
+ * Returns { data: base64, mediaType: 'image/png' | 'image/jpeg' }
+ */
+async function compressImageIfNeeded(
+  browser: ReturnType<typeof puppeteer.launch> extends Promise<infer T> ? T : never,
+  base64Image: string,
+  maxSizeBytes: number = 4 * 1024 * 1024 // 4MB default
+): Promise<{ data: string; mediaType: 'image/png' | 'image/jpeg' }> {
+  // Calculate approximate size (base64 is ~33% larger than binary)
+  const base64Length = base64Image.length;
+  const approxSize = (base64Length * 3) / 4;
+
+  console.log(`Checking image size: base64 length=${base64Length}, approx binary=${(approxSize / 1024 / 1024).toFixed(2)}MB, threshold=${(maxSizeBytes / 1024 / 1024).toFixed(2)}MB`);
+
+  if (approxSize <= maxSizeBytes) {
+    console.log('Image within size limit, no compression needed');
+    return { data: base64Image, mediaType: 'image/png' }; // No compression needed
+  }
+
+  console.log(`Image too large (${(approxSize / 1024 / 1024).toFixed(2)}MB), compressing...`);
+
+  const page = await browser.newPage();
+  try {
+    // Calculate scale factor to get under the size limit
+    const scaleFactor = Math.sqrt(maxSizeBytes / approxSize) * 0.9; // 0.9 for safety margin
+
+    const compressedBase64 = await page.evaluate(async (imgData: string, scale: number) => {
+      return new Promise<string>((resolve, reject) => {
+        const img = new Image();
+        img.onload = () => {
+          const canvas = document.createElement('canvas');
+          const newWidth = Math.floor(img.width * scale);
+          const newHeight = Math.floor(img.height * scale);
+          canvas.width = newWidth;
+          canvas.height = newHeight;
+
+          const ctx = canvas.getContext('2d');
+          if (!ctx) {
+            reject(new Error('Could not get canvas context'));
+            return;
+          }
+
+          ctx.drawImage(img, 0, 0, newWidth, newHeight);
+          // Use JPEG for better compression on photos
+          const dataUrl = canvas.toDataURL('image/jpeg', 0.85);
+          resolve(dataUrl.split(',')[1]); // Return just the base64 part
+        };
+        img.onerror = () => reject(new Error('Failed to load image'));
+        img.src = 'data:image/png;base64,' + imgData;
+      });
+    }, base64Image, scaleFactor);
+
+    const newSize = (compressedBase64.length * 3) / 4;
+    console.log(`Compressed image to ${(newSize / 1024 / 1024).toFixed(2)}MB`);
+
+    return { data: compressedBase64, mediaType: 'image/jpeg' };
+  } finally {
+    await page.close();
+  }
+}
+
+/**
+ * Dismiss cookie consent banners before taking screenshots
+ * Uses multiple strategies: click buttons, text matching, CSS hiding
+ */
+async function dismissCookieBanners(page: Page): Promise<void> {
+  console.log('Dismissing cookie consent banners...');
+
+  // Strategy 1: Try common button selectors
+  const commonSelectors = [
+    '#onetrust-accept-btn-handler',
+    '.onetrust-close-btn-handler',
+    '#CybotCookiebotDialogBodyLevelButtonLevelOptinAllowAll',
+    '#CybotCookiebotDialogBodyButtonAccept',
+    '.trustarc-agree-btn',
+    '.qc-cmp2-summary-buttons button[mode="primary"]',
+    '[class*="cookie"] [class*="accept"]',
+    '[class*="cookie"] [class*="agree"]',
+    '[class*="consent"] [class*="accept"]',
+    '[class*="consent"] [class*="agree"]',
+    '[class*="gdpr"] [class*="accept"]',
+    '.cc-accept',
+    '.cc-allow',
+    '.cc-btn.cc-dismiss',
+  ];
+
+  for (const selector of commonSelectors) {
+    try {
+      const button = await page.$(selector);
+      if (button) {
+        const isVisible = await button.isIntersectingViewport();
+        if (isVisible) {
+          await button.click();
+          await new Promise(r => setTimeout(r, 500));
+          console.log(`Dismissed cookie banner via: ${selector}`);
+          return;
+        }
+      }
+    } catch {
+      // Continue to next selector
+    }
+  }
+
+  // Strategy 2: Find buttons by text content
+  const dismissed = await page.evaluate(() => {
+    const acceptTexts = [
+      'accept all', 'accept cookies', 'accept', 'agree to all', 'agree',
+      'allow all', 'allow cookies', 'allow', 'i agree', 'i accept',
+      'got it', 'ok', 'continue', 'dismiss'
+    ];
+
+    const bannerSelectors = [
+      '[class*="cookie"]', '[class*="consent"]', '[class*="gdpr"]',
+      '[class*="privacy"]', '[id*="cookie"]', '[id*="consent"]',
+      '[role="dialog"]', '[role="alertdialog"]'
+    ];
+
+    for (const containerSelector of bannerSelectors) {
+      const containers = document.querySelectorAll(containerSelector);
+      for (const container of containers) {
+        const rect = container.getBoundingClientRect();
+        if (rect.width === 0 || rect.height === 0) continue;
+
+        const clickables = container.querySelectorAll('button, a, [role="button"], [class*="btn"]');
+        for (const el of clickables) {
+          const text = (el.textContent || '').toLowerCase().trim();
+          for (const acceptText of acceptTexts) {
+            if (text === acceptText || text.includes(acceptText)) {
+              (el as HTMLElement).click();
+              return true;
+            }
+          }
+        }
+      }
+    }
+    return false;
+  });
+
+  if (dismissed) {
+    await new Promise(r => setTimeout(r, 500));
+    console.log('Dismissed cookie banner via text matching');
+    return;
+  }
+
+  // Strategy 3: Hide cookie banners via CSS injection
+  await page.evaluate(() => {
+    const style = document.createElement('style');
+    style.textContent = `
+      [class*="cookie-banner"], [class*="cookie-consent"], [class*="cookie-notice"],
+      [class*="gdpr-banner"], [class*="consent-banner"], [class*="privacy-banner"],
+      [class*="cookie-disclaimer"], [class*="cookies-disclaimer"],
+      [id*="cookie-banner"], [id*="cookie-consent"], [id*="gdpr"],
+      .cc-banner, .cc-window, #onetrust-banner-sdk, #CybotCookiebotDialog,
+      [class*="CookieConsent"], [class*="cookieConsent"],
+      [class*="cookie-policy"], [class*="cookie-popup"],
+      [aria-label*="cookie"], [aria-label*="consent"],
+      [role="dialog"][class*="cookie"], [role="alertdialog"][class*="cookie"] {
+        display: none !important;
+        visibility: hidden !important;
+        opacity: 0 !important;
+        pointer-events: none !important;
+      }
+    `;
+    document.head.appendChild(style);
+  });
+  console.log('Applied CSS to hide cookie banners');
+}
 
 export default {
   async fetch(request: Request, env: Env): Promise<Response> {
@@ -51,6 +237,11 @@ export default {
       return handleDebugBboxes(request, env);
     }
 
+    // Debug: View section extraction for Y-boundaries
+    if (url.pathname === '/debug/section' && request.method === 'POST') {
+      return handleDebugSection(request, env);
+    }
+
     // Analyze page to identify blocks
     if (url.pathname === '/analyze' && request.method === 'POST') {
       return handleAnalyze(request, env);
@@ -64,6 +255,21 @@ export default {
     // Preview endpoint (HTML page for browser)
     if (url.pathname === '/preview' && request.method === 'POST') {
       return handlePreview(request, env);
+    }
+
+    // Block generate endpoint (multipart form data with screenshot + HTML)
+    if (url.pathname === '/block-generate' && request.method === 'POST') {
+      return handleBlockGenerate(request, env);
+    }
+
+    // Block refine endpoint (iterative refinement with pixelmatch)
+    if (url.pathname === '/block-refine' && request.method === 'POST') {
+      return handleBlockRefine(request, env);
+    }
+
+    // Test UI for block-generate and block-refine
+    if (url.pathname === '/test' && request.method === 'GET') {
+      return handleBlockTestUI(env);
     }
 
     // 404 for unknown routes
@@ -99,6 +305,44 @@ function getAnthropicConfig(env: Env): AnthropicConfig | undefined {
 }
 
 /**
+ * Launch browser with retry logic for session errors
+ */
+async function launchBrowserWithRetry(
+  browserBinding: any,
+  maxRetries: number = 3,
+  delayMs: number = 1000
+): Promise<ReturnType<typeof puppeteer.launch>> {
+  let lastError: Error | undefined;
+
+  for (let attempt = 1; attempt <= maxRetries; attempt++) {
+    try {
+      const browser = await puppeteer.launch(browserBinding);
+      return browser;
+    } catch (error) {
+      lastError = error as Error;
+      const errorMessage = lastError.message || '';
+
+      // Check if it's a session connection error (retryable)
+      if (errorMessage.includes('Unable to connect to existing session') ||
+          errorMessage.includes('Target closed') ||
+          errorMessage.includes('not ready yet')) {
+        console.log(`Browser launch attempt ${attempt}/${maxRetries} failed, retrying in ${delayMs}ms...`);
+        if (attempt < maxRetries) {
+          await new Promise(resolve => setTimeout(resolve, delayMs));
+          continue;
+        }
+      }
+
+      // Non-retryable error, throw immediately
+      throw error;
+    }
+  }
+
+  // All retries exhausted
+  throw lastError || new Error('Failed to launch browser after retries');
+}
+
+/**
  * Capture screenshot and analyze design using Claude Vision (legacy - extracts tokens only)
  */
 async function analyzeDesignFromScreenshot(
@@ -127,14 +371,16 @@ async function analyzeDesignFromScreenshot(
 }
 
 /**
- * Generate block from a visual description
- * Claude sees the full page and uses the description to find and generate the block
+ * Generate block from Y-boundaries
+ * Extracts actual DOM content, crops screenshot, extracts CSS - then generates with real data
  */
 async function generateBlockFromDescription(
   url: string,
   sectionDescription: string,
   sectionName: string,
   env: Env,
+  yStart: number = 0,
+  yEnd: number = 0,
   maxRetries: number = 3
 ): Promise<EnhancedBlockCode | undefined> {
   const anthropicConfig = getAnthropicConfig(env);
@@ -150,42 +396,267 @@ async function generateBlockFromDescription(
       try {
         const page = await browser.newPage();
         await page.setViewport({ width: 1440, height: 900 });
-        await page.goto(url, { waitUntil: 'networkidle0', timeout: 30000 });
+        // Set desktop user agent to ensure desktop layout
+        await page.setUserAgent('Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36');
+        await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 60000 });
+        await new Promise(resolve => setTimeout(resolve, 2000));
 
-        // Get page dimensions and take full screenshot
+        // Dismiss cookie consent banners before screenshots
+        try {
+          await dismissCookieBanners(page);
+        } catch (e) {
+          console.log('Cookie dismissal error:', e);
+        }
+
+        // Scroll to load lazy content (same as analysis phase)
+        await page.evaluate(async () => {
+          const delay = (ms: number) => new Promise(r => setTimeout(r, ms));
+          const scrollHeight = document.documentElement.scrollHeight;
+          const viewportHeight = window.innerHeight;
+          const scrollStep = viewportHeight * 0.8;
+          let currentPosition = 0;
+          while (currentPosition < scrollHeight) {
+            window.scrollTo(0, currentPosition);
+            await delay(150);
+            currentPosition += scrollStep;
+          }
+          window.scrollTo(0, scrollHeight);
+          await delay(300);
+          window.scrollTo(0, 0);
+        });
+        await new Promise(resolve => setTimeout(resolve, 1000));
+
+        // Get page dimensions after scroll
         const dimensions = await page.evaluate(() => ({
           width: document.documentElement.scrollWidth,
           height: document.documentElement.scrollHeight,
         }));
 
-        const maxHeight = Math.min(dimensions.height, 8000);
-        console.log(`Taking screenshot: ${dimensions.width}x${maxHeight}`);
+        console.log(`Page loaded: ${dimensions.width}x${dimensions.height}`);
+        console.log(`Looking for section at Y: ${yStart}-${yEnd}`);
 
-        const screenshotBuffer = await page.screenshot({
-          clip: { x: 0, y: 0, width: dimensions.width, height: maxHeight },
-          type: 'png',
-        }) as Buffer;
-        const screenshot = screenshotBuffer.toString('base64');
+        // Find the DOM element at the Y position and extract its content
+        const sectionData = await page.evaluate((yS: number, yE: number) => {
+          const targetHeight = yE - yS;
 
-        // Extract all images from the page for reference
-        let liveImages: ExtractedImage[] = [];
+          // First, scroll to bring the section into view
+          window.scrollTo(0, Math.max(0, yS - 100));
+
+          // Find elements that intersect with our Y range
+          const allElements = document.querySelectorAll('body *');
+          const candidates: { el: Element; score: number; elTop: number; elHeight: number }[] = [];
+
+          for (const el of allElements) {
+            const rect = el.getBoundingClientRect();
+            const elTop = rect.top + window.scrollY;
+            const elBottom = elTop + rect.height;
+
+            // Skip tiny elements, scripts, styles, etc.
+            if (rect.width < 100 || rect.height < 30) continue;
+            if (['SCRIPT', 'STYLE', 'NOSCRIPT', 'META', 'LINK', 'BR', 'HR'].includes(el.tagName)) continue;
+
+            // Check overlap with target Y range
+            const overlapStart = Math.max(yS, elTop);
+            const overlapEnd = Math.min(yE, elBottom);
+            const overlap = Math.max(0, overlapEnd - overlapStart);
+
+            if (overlap > 0) {
+              // Score based on how well the element MATCHES the target range (not just overlaps)
+              const rangeCoverage = overlap / targetHeight; // How much of target is covered (want ~1.0)
+
+              // CRITICAL: Penalize elements that don't match target size
+              // Both too-large AND too-small elements should be penalized
+              const sizeRatio = rect.height / targetHeight;
+              let sizePenalty = 1;
+              if (sizeRatio > 2) {
+                // Too large: penalize proportionally
+                sizePenalty = Math.max(0.2, 1 / Math.sqrt(sizeRatio));
+              } else if (sizeRatio < 0.5) {
+                // Too small: also penalize - element doesn't contain full section
+                sizePenalty = Math.max(0.3, sizeRatio * 1.5);
+              }
+
+              // CRITICAL: Boundary matching - element should START and END near target
+              const startDiff = Math.abs(elTop - yS) / targetHeight;
+              const endDiff = Math.abs(elBottom - yE) / targetHeight;
+              // Strong penalty if element doesn't start/end near target boundaries
+              const boundaryPenalty = Math.max(0.3, 1 - (startDiff + endDiff) * 0.4);
+
+              // Base score: coverage * size fit * boundary fit
+              let score = rangeCoverage * sizePenalty * boundaryPenalty;
+
+              // Bonus for semantic section elements
+              const isSection = ['SECTION', 'ARTICLE', 'MAIN'].includes(el.tagName);
+              if (isSection) score *= 1.15;
+
+              // Bonus for elements with meaningful classes (not generic divs)
+              const hasClasses = el.classList.length > 0;
+              if (hasClasses && !['SECTION', 'ARTICLE', 'MAIN'].includes(el.tagName)) {
+                score *= 1.05;
+              }
+
+              candidates.push({ el, score, elTop, elHeight: rect.height });
+            }
+          }
+
+          if (candidates.length === 0) {
+            return null;
+          }
+
+          // Sort by score descending
+          candidates.sort((a, b) => b.score - a.score);
+
+          // Get best candidate
+          let bestElement = candidates[0].el;
+          let bestScore = candidates[0].score;
+
+          // If best candidate is much larger than target, look for better children
+          const bestRect = bestElement.getBoundingClientRect();
+          if (bestRect.height > targetHeight * 2.5) {
+            // Try to find a direct child that fits better
+            const children = bestElement.children;
+            for (const child of children) {
+              const childRect = child.getBoundingClientRect();
+              const childTop = childRect.top + window.scrollY;
+              const childBottom = childTop + childRect.height;
+
+              // Check if child overlaps with target
+              const childOverlapStart = Math.max(yS, childTop);
+              const childOverlapEnd = Math.min(yE, childBottom);
+              const childOverlap = Math.max(0, childOverlapEnd - childOverlapStart);
+
+              if (childOverlap > targetHeight * 0.5 && childRect.height < bestRect.height * 0.8) {
+                // This child is a better fit
+                const childRangeCoverage = childOverlap / targetHeight;
+                const childElementCoverage = childOverlap / childRect.height;
+                const childSizeRatio = childRect.height / targetHeight;
+                const childSizePenalty = childSizeRatio > 2 ? Math.max(0.1, 1 / childSizeRatio) : 1;
+                const childScore = (childRangeCoverage * 0.4 + childElementCoverage * 0.4) * childSizePenalty;
+
+                if (childScore > bestScore * 0.7) { // Accept if reasonably close
+                  bestElement = child;
+                  bestScore = childScore;
+                  break;
+                }
+              }
+            }
+          }
+
+          // Get the element's bounding box for screenshot cropping
+          const rect = bestElement.getBoundingClientRect();
+          const bbox = {
+            x: 0, // Full width
+            y: rect.top + window.scrollY,
+            width: document.documentElement.scrollWidth,
+            height: rect.height,
+          };
+
+          // Extract the actual HTML content
+          const html = bestElement.outerHTML;
+
+          // Extract text content for reference
+          const textContent = bestElement.textContent?.trim().substring(0, 2000) || '';
+
+          // Find all images within this section
+          const images: { src: string; alt: string }[] = [];
+          const imgElements = bestElement.querySelectorAll('img');
+          imgElements.forEach(img => {
+            const src = img.src || img.dataset.src || img.getAttribute('data-lazy-src') || '';
+            if (src && !src.startsWith('data:')) {
+              images.push({ src, alt: img.alt || '' });
+            }
+          });
+
+          // CRITICAL: Check background-image on the element ITSELF first
+          const elStyle = window.getComputedStyle(bestElement);
+          const elBgImage = elStyle.backgroundImage;
+          if (elBgImage && elBgImage !== 'none' && elBgImage.includes('url(')) {
+            const match = elBgImage.match(/url\(['"]?([^'"]+)['"]?\)/);
+            if (match && match[1] && !match[1].startsWith('data:')) {
+              images.push({ src: match[1], alt: 'background' });
+            }
+          }
+
+          // Also get background images from child elements
+          const bgElements = bestElement.querySelectorAll('*');
+          bgElements.forEach(el => {
+            const style = window.getComputedStyle(el);
+            const bgImage = style.backgroundImage;
+            if (bgImage && bgImage !== 'none' && bgImage.includes('url(')) {
+              const match = bgImage.match(/url\(['"]?([^'"]+)['"]?\)/);
+              if (match && match[1] && !match[1].startsWith('data:')) {
+                images.push({ src: match[1], alt: 'background' });
+              }
+            }
+          });
+
+          return {
+            html,
+            textContent,
+            images,
+            bbox,
+            selector: bestElement.tagName.toLowerCase() +
+              (bestElement.id ? `#${bestElement.id}` : '') +
+              (bestElement.classList.length > 0 ? `.${Array.from(bestElement.classList).join('.')}` : ''),
+            debugInfo: {
+              score: bestScore,
+              elTop: rect.top + window.scrollY,
+              elHeight: rect.height,
+              candidateCount: candidates.length,
+            }
+          };
+        }, yStart, yEnd);
+
+        if (!sectionData) {
+          console.error('Could not find DOM element at Y position');
+          return undefined;
+        }
+
+        console.log(`Found element: ${sectionData.selector}`);
+        console.log(`  Element Y: ${Math.round(sectionData.debugInfo.elTop)}-${Math.round(sectionData.debugInfo.elTop + sectionData.debugInfo.elHeight)}px (height: ${Math.round(sectionData.debugInfo.elHeight)}px)`);
+        console.log(`  Target Y: ${yStart}-${yEnd}px (height: ${yEnd - yStart}px)`);
+        console.log(`  Score: ${(sectionData.debugInfo.score * 100).toFixed(1)}%, Candidates: ${sectionData.debugInfo.candidateCount}`);
+        console.log(`Extracted ${sectionData.images.length} images`);
+        if (sectionData.images.length > 0) {
+          sectionData.images.slice(0, 3).forEach(img => console.log(`  - ${img.alt}: ${img.src.substring(0, 80)}...`));
+        }
+        console.log(`HTML length: ${sectionData.html.length} chars`);
+
+        // Scroll to the element and take a cropped screenshot
+        const bbox = sectionData.bbox;
+        const screenshotHeight = Math.min(bbox.height, 2000); // Limit screenshot height
+
+        let sectionScreenshot: string;
         try {
-          liveImages = await extractLiveImages(page, 'body', url);
-          console.log(`Found ${liveImages.length} images on page`);
+          const screenshotBuffer = await page.screenshot({
+            clip: {
+              x: 0,
+              y: Math.max(0, bbox.y),
+              width: Math.min(dimensions.width, 1440),
+              height: screenshotHeight,
+            },
+            type: 'png',
+          }) as Buffer;
+          sectionScreenshot = screenshotBuffer.toString('base64');
+          console.log(`Captured section screenshot: ${dimensions.width}x${screenshotHeight}`);
         } catch (e) {
-          console.warn('Image extraction failed:', e);
+          console.error('Failed to capture section screenshot:', e);
+          // Fallback to viewport screenshot
+          const viewportBuffer = await page.screenshot({ type: 'png' }) as Buffer;
+          sectionScreenshot = viewportBuffer.toString('base64');
         }
 
         await page.close();
 
-        // Generate block using description-based approach
+        // Generate block with actual extracted content
         console.log(`Generating block for: ${sectionName}`);
         const block = await generateBlockFromDescriptionWithClaude(
-          screenshot,
+          sectionScreenshot,
           sectionDescription,
           sectionName,
           url,
-          liveImages,
+          sectionData.images.map(img => ({ src: img.src, role: img.alt || 'image' })),
+          sectionData.html,
           anthropicConfig
         );
 
@@ -214,30 +685,53 @@ async function generateBlockFromDescription(
 }
 
 /**
- * Use Claude to find and generate block from description
+ * Use Claude to generate block from extracted content and screenshot
+ * Claude receives the actual HTML content and must use it - not invent content
  */
 async function generateBlockFromDescriptionWithClaude(
   screenshotBase64: string,
   sectionDescription: string,
   sectionName: string,
   baseUrl: string,
-  liveImages: ExtractedImage[],
+  liveImages: { src: string; role: string }[],
+  extractedHtml: string,
   config: AnthropicConfig
 ): Promise<EnhancedBlockCode> {
   const imageList = liveImages.length > 0
-    ? `\n\nAVAILABLE IMAGES FROM PAGE:\n${liveImages.map(img => `- ${img.src} (${img.role})`).join('\n')}`
+    ? `\n\n## ACTUAL IMAGES FROM THIS SECTION (use these exact URLs):\n${liveImages.map(img => `- ${img.src}`).join('\n')}`
     : '';
 
-  const prompt = `Look at this webpage screenshot. Find the section matching this description:
+  // Truncate HTML if too long but keep structure visible
+  const htmlPreview = extractedHtml.length > 15000
+    ? extractedHtml.substring(0, 15000) + '\n... [truncated]'
+    : extractedHtml;
+
+  const prompt = `You are converting a webpage section to an AEM Edge Delivery Services (EDS) block.
+
+## YOUR TASK
+Look at this screenshot of the section and the extracted HTML below.
+Generate an EDS block that recreates this EXACT section with the EXACT same content.
 
 SECTION NAME: ${sectionName}
 DESCRIPTION: ${sectionDescription}
 
-Generate an AEM Edge Delivery Services (EDS) block that recreates this specific section.
+## CRITICAL RULES - YOU MUST FOLLOW THESE
+
+1. **USE THE EXACT TEXT from the extracted HTML** - Do NOT invent, paraphrase, or modify any text content
+2. **USE THE EXACT IMAGE URLs** from the extracted HTML or image list - Do NOT use placeholder URLs
+3. **MATCH THE VISUAL DESIGN** from the screenshot - colors, fonts, layout, spacing
+4. The generated block MUST contain the same content as the original - same headings, same paragraphs, same images, same links
+
+## EXTRACTED HTML FROM THE PAGE (this is the actual content - use it!)
+
+\`\`\`html
+${htmlPreview}
+\`\`\`
+${imageList}
 
 ## EDS Block Requirements
 
-HTML structure:
+EDS blocks have this structure before decoration:
 \`\`\`html
 <div class="{block-name} block">
   <div><!-- row 1 -->
@@ -247,32 +741,30 @@ HTML structure:
 </div>
 \`\`\`
 
-The JS decoration function transforms this into the final rendered structure.
-${imageList}
+The JS decorate() function transforms this into the final rendered HTML.
 
-## Critical Instructions
+## What You Need to Generate
 
-1. **Find the section** in the screenshot that matches the description
-2. **Match the visual design EXACTLY** - colors, fonts, layout, spacing
-3. **Use REAL image URLs** from the AVAILABLE IMAGES list above - NEVER use placeholder or invented URLs
-4. **Extract actual text content** visible in that section
-5. **Generate working CSS** that recreates the exact appearance
-6. **Generate JS decoration** that transforms the EDS markup into the rendered HTML
+1. **HTML**: EDS block markup containing the EXACT text and image URLs from the extracted HTML
+2. **CSS**: Styles that recreate the visual appearance from the screenshot
+3. **JS**: A decorate(block) function that transforms the EDS markup into rendered HTML
 
 ## Return Format
 
 Return JSON:
 {
   "blockName": "descriptive-block-name",
-  "componentType": "hero|cards|columns|etc",
-  "html": "<!-- EDS block markup with actual content and real image URLs -->",
-  "css": "/* Complete CSS to match the visual design */",
+  "componentType": "hero|cards|columns|tabs|content|etc",
+  "html": "<!-- EDS block with EXACT content from extracted HTML -->",
+  "css": "/* CSS matching the screenshot design */",
   "js": "/* ES module: export default function decorate(block) { ... } */"
 }
 
+REMEMBER: The text in your HTML output MUST match the text in the extracted HTML exactly. Do not invent content.
+
 Return ONLY the JSON object.`;
 
-  const response = await callClaudeForGeneration(screenshotBase64, prompt, config, 8192);
+  const response = await callClaudeForGeneration(screenshotBase64, prompt, config, 12000);
 
   try {
     let jsonStr: string | null = null;
@@ -684,7 +1176,7 @@ async function handleAnalyze(request: Request, env: Env): Promise<Response> {
       const page = await browser.newPage();
       const result = await analyzePage(page, url.trim(), anthropicConfig);
 
-      // Return sections with descriptions only - generator will use description to find section
+      // Return sections with descriptions and Y-boundaries for generation
       return Response.json(
         {
           success: true,
@@ -697,6 +1189,8 @@ async function handleAnalyze(request: Request, env: Env): Promise<Response> {
             type: s.type,
             priority: s.priority,
             style: s.style,
+            yStart: s.yStart,
+            yEnd: s.yEnd,
           })),
           screenshot: result.screenshot,
           pageWidth: result.pageWidth,
@@ -880,10 +1374,17 @@ async function handlePreview(request: Request, env: Env): Promise<Response> {
     let blockCSS: string;
     let componentType: string | undefined;
 
-    // NEW: Description-based approach (from /analyze)
+    // NEW: Description-based approach (from /analyze) with Y-boundaries
     if (body.sectionDescription && body.sectionName) {
-      console.log(`Preview: Using description-based approach for "${body.sectionName}"`);
-      const enhancedBlock = await generateBlockFromDescription(body.url, body.sectionDescription, body.sectionName, env);
+      console.log(`Preview: Using description-based approach for "${body.sectionName}" (Y: ${body.yStart}-${body.yEnd})`);
+      const enhancedBlock = await generateBlockFromDescription(
+        body.url,
+        body.sectionDescription,
+        body.sectionName,
+        env,
+        body.yStart || 0,
+        body.yEnd || 0
+      );
 
       if (!enhancedBlock) {
         return Response.json(
@@ -1116,6 +1617,912 @@ async function handlePreview(request: Request, env: Env): Promise<Response> {
       { status: 500, headers: corsHeaders(env) }
     );
   }
+}
+
+/**
+ * Handles the block-generate endpoint
+ * Accepts multipart form data with screenshot, URL, and HTML
+ */
+async function handleBlockGenerate(request: Request, env: Env): Promise<Response> {
+  try {
+    const formData = await request.formData();
+
+    const url = formData.get('url') as string;
+    const screenshotFile = formData.get('screenshot') as File;
+    let html = formData.get('html') as string;
+    const xpath = formData.get('xpath') as string;
+
+    // Validate required fields with specific messages
+    const missing: string[] = [];
+    if (!url) missing.push('url');
+    if (!screenshotFile) missing.push('screenshot');
+    if (!html && !xpath) missing.push('html or xpath');
+
+    if (missing.length > 0) {
+      return Response.json(
+        { success: false, error: `Missing required fields: ${missing.join(', ')}`, code: 'INVALID_REQUEST' },
+        { status: 400, headers: corsHeaders(env) }
+      );
+    }
+
+    // Get Anthropic config
+    const anthropicConfig = getAnthropicConfig(env);
+    if (!anthropicConfig) {
+      return Response.json(
+        { success: false, error: 'Anthropic API not configured', code: 'INTERNAL_ERROR' },
+        { status: 500, headers: corsHeaders(env) }
+      );
+    }
+
+    if (!env.BROWSER) {
+      return Response.json(
+        { success: false, error: 'Browser Rendering not configured', code: 'INTERNAL_ERROR' },
+        { status: 500, headers: corsHeaders(env) }
+      );
+    }
+
+    // Convert screenshot File to base64 (chunk-based to avoid stack overflow)
+    const arrayBuffer = await screenshotFile.arrayBuffer();
+    let screenshotBase64 = arrayBufferToBase64(arrayBuffer);
+
+    // Launch Puppeteer to extract CSS and live images from the page
+    let extractedCssStyles: string | undefined;
+    let liveImages: ExtractedImage[] = [];
+
+    let screenshotMediaType: 'image/png' | 'image/jpeg' = 'image/png';
+
+    try {
+      const browser = await launchBrowserWithRetry(env.BROWSER);
+      try {
+        // Compress screenshot if too large for Claude API (5MB limit)
+        const compressed = await compressImageIfNeeded(browser, screenshotBase64);
+        screenshotBase64 = compressed.data;
+        screenshotMediaType = compressed.mediaType;
+
+        const page = await browser.newPage();
+        await page.setViewport({ width: 1440, height: 900 });
+        await page.goto(url, { waitUntil: 'networkidle0', timeout: 30000 });
+
+        // Dismiss cookie banners
+        await dismissCookieBanners(page);
+
+        // If xpath is provided, extract HTML from that element
+        if (xpath && !html) {
+          try {
+            console.log(`Extracting HTML from XPath: ${xpath}`);
+            const extractedHtml = await page.evaluate((xpathExpr: string) => {
+              const result = document.evaluate(
+                xpathExpr,
+                document,
+                null,
+                XPathResult.FIRST_ORDERED_NODE_TYPE,
+                null
+              );
+              const element = result.singleNodeValue as Element;
+              if (element) {
+                return element.outerHTML;
+              }
+              return null;
+            }, xpath);
+
+            if (extractedHtml) {
+              html = extractedHtml;
+              console.log(`Extracted HTML from XPath (${html.length} chars)`);
+            } else {
+              console.warn(`No element found at XPath: ${xpath}`);
+            }
+          } catch (xpathError) {
+            console.warn('XPath extraction failed:', xpathError);
+          }
+        }
+
+        // Extract live images - use xpath selector if available, otherwise whole page
+        const imageSelector = xpath ? 'body' : 'body';
+        try {
+          console.log('Extracting live images from page...');
+          liveImages = await extractLiveImages(page, imageSelector, url);
+          console.log(`Found ${liveImages.length} live images`);
+        } catch (imgError) {
+          console.warn('Live image extraction failed:', imgError);
+        }
+
+        // Extract computed styles from the page
+        try {
+          console.log('Extracting computed CSS styles...');
+          const styles = await extractComputedStyles(browser, url, 'body');
+          extractedCssStyles = formatStylesForPrompt(styles);
+        } catch (styleError) {
+          console.warn('Style extraction failed:', styleError);
+        }
+
+        await page.close();
+      } finally {
+        await browser.close();
+      }
+    } catch (browserError) {
+      console.warn('Browser operations failed, continuing without:', browserError);
+    }
+
+    // Final validation - we need html at this point
+    if (!html) {
+      return Response.json(
+        { success: false, error: 'Could not extract HTML from provided xpath', code: 'EXTRACTION_FAILED' },
+        { status: 400, headers: corsHeaders(env) }
+      );
+    }
+
+    // Generate block using the enhanced generator
+    console.log(`Generating block with Claude Vision... (mediaType=${screenshotMediaType})`);
+    const enhancedBlock = await generateBlockEnhanced(
+      screenshotBase64,
+      html,
+      url,
+      anthropicConfig,
+      extractedCssStyles,
+      liveImages,
+      screenshotMediaType
+    );
+
+    // Build response
+    const response: BlockResponse = {
+      success: true,
+      blockName: enhancedBlock.blockName,
+      layoutPattern: enhancedBlock.componentType as any || 'unknown',
+      html: enhancedBlock.html,
+      js: enhancedBlock.js,
+      css: enhancedBlock.css,
+      metadata: {
+        elementCount: 0,
+        hasImages: liveImages.length > 0,
+        hasHeadings: true,
+        hasLinks: true,
+        rowCount: 1,
+        columnCount: 1,
+      },
+    };
+
+    return Response.json(response, { status: 200, headers: corsHeaders(env) });
+  } catch (error) {
+    return handleError(error, env);
+  }
+}
+
+/**
+ * Handles the block-refine endpoint
+ * Accepts existing block code and refines it using pixelmatch comparison
+ */
+async function handleBlockRefine(request: Request, env: Env): Promise<Response> {
+  try {
+    const formData = await request.formData();
+
+    const url = formData.get('url') as string;
+    const screenshotFile = formData.get('screenshot') as File;
+    let html = formData.get('html') as string;
+    const xpath = formData.get('xpath') as string;
+    const blockHtml = formData.get('blockHtml') as string;
+    const blockCss = formData.get('blockCss') as string;
+    const blockJs = formData.get('blockJs') as string;
+    const blockName = formData.get('blockName') as string || 'refined-block';
+    const refinePrompt = formData.get('prompt') as string;
+
+    // Validate required fields - html OR xpath must be provided
+    const missing: string[] = [];
+    if (!url) missing.push('url');
+    if (!screenshotFile) missing.push('screenshot');
+    if (!html && !xpath) missing.push('html or xpath');
+    if (!blockHtml) missing.push('blockHtml');
+    if (!blockCss) missing.push('blockCss');
+    if (!blockJs) missing.push('blockJs');
+
+    if (missing.length > 0) {
+      return Response.json(
+        { success: false, error: `Missing required fields: ${missing.join(', ')}`, code: 'INVALID_REQUEST' },
+        { status: 400, headers: corsHeaders(env) }
+      );
+    }
+
+    // Get Anthropic config
+    const anthropicConfig = getAnthropicConfig(env);
+    if (!anthropicConfig) {
+      return Response.json(
+        { success: false, error: 'Anthropic API not configured', code: 'INTERNAL_ERROR' },
+        { status: 500, headers: corsHeaders(env) }
+      );
+    }
+
+    if (!env.BROWSER) {
+      return Response.json(
+        { success: false, error: 'Browser Rendering not configured', code: 'INTERNAL_ERROR' },
+        { status: 500, headers: corsHeaders(env) }
+      );
+    }
+
+    // Convert screenshot File to base64
+    const arrayBuffer = await screenshotFile.arrayBuffer();
+    let originalScreenshotBase64 = arrayBufferToBase64(arrayBuffer);
+
+    // Create current block object
+    const currentBlock: BlockCode = {
+      html: blockHtml,
+      css: blockCss,
+      js: blockJs,
+      blockName
+    };
+
+    // Launch Puppeteer with retry logic and refine
+    const browser = await launchBrowserWithRetry(env.BROWSER);
+
+    // For refine endpoint, keep original PNG for pixelmatch comparison
+    // Compression for Claude API will be handled inside refineBlock's analyzeAndRefine
+    // Note: We don't compress here because compareScreenshots needs PNG format
+
+    // If xpath is provided but html is not, extract the HTML
+    if (xpath && !html) {
+      try {
+        const page = await browser.newPage();
+        await page.goto(url, { waitUntil: 'networkidle0', timeout: 30000 });
+        console.log(`Extracting HTML from XPath: ${xpath}`);
+        const extractedHtml = await page.evaluate((xpathExpr: string) => {
+          const result = document.evaluate(
+            xpathExpr,
+            document,
+            null,
+            XPathResult.FIRST_ORDERED_NODE_TYPE,
+            null
+          );
+          const element = result.singleNodeValue as Element;
+          return element ? element.outerHTML : null;
+        }, xpath);
+        if (extractedHtml) {
+          html = extractedHtml;
+          console.log(`Extracted HTML from XPath (${html.length} chars)`);
+        }
+        await page.close();
+      } catch (xpathError) {
+        console.warn('XPath extraction failed:', xpathError);
+      }
+    }
+    try {
+      const result = await refineBlock(
+        browser,
+        originalScreenshotBase64,
+        currentBlock,
+        anthropicConfig,
+        { width: 1440, height: 900 },
+        5, // 5% diff threshold
+        refinePrompt || undefined
+      );
+
+      // Build response
+      const response = {
+        success: true,
+        blockName: result.block.blockName || blockName,
+        html: result.block.html,
+        js: result.block.js,
+        css: result.block.css,
+        diff: result.diff,
+        refinementApplied: result.refinementApplied,
+        refinementNotes: result.refinementNotes,
+        generatedScreenshot: result.generatedScreenshot
+      };
+
+      return Response.json(response, { status: 200, headers: corsHeaders(env) });
+    } finally {
+      await browser.close();
+    }
+  } catch (error) {
+    return handleError(error, env);
+  }
+}
+
+/**
+ * Returns the test UI HTML page for block-generate and block-refine
+ */
+function handleBlockTestUI(env: Env): Response {
+  const html = `<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Block Generator Test UI</title>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+      background: #f5f5f5;
+      min-height: 100vh;
+      padding: 20px;
+    }
+    .container {
+      max-width: 1800px;
+      margin: 0 auto;
+    }
+    h1 {
+      margin-bottom: 20px;
+      color: #333;
+    }
+    .panels {
+      display: grid;
+      grid-template-columns: 400px 1fr;
+      gap: 20px;
+    }
+    .panel {
+      background: white;
+      border-radius: 8px;
+      padding: 20px;
+      box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+    }
+    .panel.wide {
+      min-width: 0;
+    }
+    .panel h2 {
+      margin-bottom: 15px;
+      color: #444;
+      font-size: 18px;
+    }
+    .form-group {
+      margin-bottom: 15px;
+    }
+    label {
+      display: block;
+      margin-bottom: 5px;
+      font-weight: 500;
+      color: #555;
+    }
+    input[type="text"], input[type="url"], textarea {
+      width: 100%;
+      padding: 10px;
+      border: 1px solid #ddd;
+      border-radius: 4px;
+      font-size: 14px;
+    }
+    textarea {
+      min-height: 150px;
+      font-family: 'Monaco', 'Menlo', monospace;
+      font-size: 12px;
+    }
+    input[type="file"] {
+      padding: 10px 0;
+    }
+    button {
+      background: #0066cc;
+      color: white;
+      border: none;
+      padding: 12px 24px;
+      border-radius: 4px;
+      cursor: pointer;
+      font-size: 14px;
+      font-weight: 500;
+    }
+    button:hover {
+      background: #0055aa;
+    }
+    button:disabled {
+      background: #ccc;
+      cursor: not-allowed;
+    }
+    button.refine {
+      background: #00aa66;
+    }
+    button.refine:hover {
+      background: #008855;
+    }
+    .button-group {
+      display: flex;
+      gap: 10px;
+      margin-top: 15px;
+    }
+    .status {
+      margin-top: 15px;
+      padding: 10px;
+      border-radius: 4px;
+      font-size: 14px;
+    }
+    .status.loading {
+      background: #fff3cd;
+      color: #856404;
+    }
+    .status.success {
+      background: #d4edda;
+      color: #155724;
+    }
+    .status.error {
+      background: #f8d7da;
+      color: #721c24;
+    }
+    .diff-info {
+      margin-top: 15px;
+      padding: 15px;
+      background: #f8f9fa;
+      border-radius: 4px;
+    }
+    .diff-score {
+      font-size: 24px;
+      font-weight: bold;
+      color: #333;
+    }
+    .diff-score.good { color: #28a745; }
+    .diff-score.medium { color: #ffc107; }
+    .diff-score.bad { color: #dc3545; }
+    .preview-container {
+      margin-top: 20px;
+      border: 1px solid #ddd;
+      border-radius: 4px;
+      overflow: hidden;
+    }
+    .preview-header {
+      background: #f8f9fa;
+      padding: 10px 15px;
+      border-bottom: 1px solid #ddd;
+      font-weight: 500;
+    }
+    .preview-content {
+      padding: 20px;
+      background: #e0e0e0;
+      overflow-x: auto;
+    }
+    .preview-frame-wrapper {
+      background: white;
+      margin: 0 auto;
+      box-shadow: 0 2px 10px rgba(0,0,0,0.15);
+      transition: width 0.3s ease;
+    }
+    .preview-content iframe {
+      width: 100%;
+      min-height: 600px;
+      border: none;
+      display: block;
+    }
+    .viewport-controls {
+      display: flex;
+      gap: 8px;
+      padding: 10px 15px;
+      background: #f0f0f0;
+      border-bottom: 1px solid #ddd;
+      align-items: center;
+    }
+    .viewport-controls label {
+      margin: 0;
+      font-size: 13px;
+      color: #666;
+    }
+    .viewport-btn {
+      padding: 6px 12px;
+      font-size: 12px;
+      background: #fff;
+      border: 1px solid #ccc;
+      border-radius: 4px;
+      cursor: pointer;
+      color: #333;
+    }
+    .viewport-btn:hover {
+      background: #f5f5f5;
+    }
+    .viewport-btn.active {
+      background: #0066cc;
+      color: white;
+      border-color: #0066cc;
+    }
+    .viewport-size {
+      margin-left: auto;
+      font-size: 12px;
+      color: #666;
+    }
+    .images-row {
+      display: grid;
+      grid-template-columns: repeat(3, 1fr);
+      gap: 15px;
+      margin-top: 15px;
+    }
+    .image-box {
+      text-align: center;
+    }
+    .image-box img {
+      max-width: 100%;
+      border: 1px solid #ddd;
+      border-radius: 4px;
+    }
+    .image-box p {
+      margin-top: 5px;
+      font-size: 12px;
+      color: #666;
+    }
+    .iteration-count {
+      font-size: 14px;
+      color: #666;
+      margin-left: 10px;
+    }
+    pre {
+      background: #f4f4f4;
+      padding: 10px;
+      border-radius: 4px;
+      overflow-x: auto;
+      font-size: 11px;
+      max-height: 200px;
+      overflow-y: auto;
+    }
+    .tabs {
+      display: flex;
+      border-bottom: 1px solid #ddd;
+      margin-bottom: 15px;
+    }
+    .tab {
+      padding: 10px 20px;
+      cursor: pointer;
+      border-bottom: 2px solid transparent;
+      color: #666;
+    }
+    .tab.active {
+      border-bottom-color: #0066cc;
+      color: #0066cc;
+    }
+    .tab-content {
+      display: none;
+    }
+    .tab-content.active {
+      display: block;
+    }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <h1>Block Generator Test UI</h1>
+
+    <div class="panels">
+      <div class="panel">
+        <h2>Input</h2>
+        <div class="form-group">
+          <label for="url">Page URL</label>
+          <input type="url" id="url" placeholder="https://example.com/page">
+        </div>
+        <div class="form-group">
+          <label for="screenshot">Screenshot (PNG)</label>
+          <input type="file" id="screenshot" accept="image/png">
+        </div>
+        <div class="form-group">
+          <label for="xpath">Element XPath (optional - alternative to HTML)</label>
+          <input type="text" id="xpath" placeholder="/html/body/div[1]/section[2]">
+        </div>
+        <div class="form-group">
+          <label for="html">Element HTML (optional if XPath provided)</label>
+          <textarea id="html" placeholder="<div class='block'>...</div>"></textarea>
+        </div>
+        <div class="form-group">
+          <label for="refinePrompt">Refine Instructions (optional)</label>
+          <textarea id="refinePrompt" placeholder="E.g., 'Fix the background gradient - it should be darker' or 'The button should be rounded with more padding'" style="min-height: 60px;"></textarea>
+        </div>
+        <div class="button-group">
+          <button id="generateBtn" onclick="generate()">Generate Block</button>
+          <button id="refineBtn" class="refine" onclick="refine()" disabled>Refine</button>
+          <span class="iteration-count" id="iterationCount"></span>
+        </div>
+        <div id="status" class="status" style="display: none;"></div>
+
+        <div id="screenshotPreview" style="margin-top: 15px; display: none;">
+          <label>Screenshot Preview:</label>
+          <img id="screenshotImg" style="max-width: 100%; border: 1px solid #ddd; border-radius: 4px;">
+        </div>
+      </div>
+
+      <div class="panel wide">
+        <h2>Generated Block</h2>
+        <div class="tabs">
+          <div class="tab active" onclick="switchTab('html')">HTML</div>
+          <div class="tab" onclick="switchTab('css')">CSS</div>
+          <div class="tab" onclick="switchTab('js')">JS</div>
+        </div>
+        <div id="htmlTab" class="tab-content active">
+          <pre id="generatedHtml">No block generated yet</pre>
+        </div>
+        <div id="cssTab" class="tab-content">
+          <pre id="generatedCss">No block generated yet</pre>
+        </div>
+        <div id="jsTab" class="tab-content">
+          <pre id="generatedJs">No block generated yet</pre>
+        </div>
+
+        <div id="diffInfo" class="diff-info" style="display: none;">
+          <div>Diff Score: <span id="diffScore" class="diff-score">-</span>%</div>
+          <div style="margin-top: 5px; font-size: 12px; color: #666;">
+            <span id="diffPixels">-</span> different pixels out of <span id="totalPixels">-</span>
+          </div>
+        </div>
+
+        <div id="imagesRow" class="images-row" style="display: none;">
+          <div class="image-box">
+            <img id="originalImg" alt="Original">
+            <p>Original</p>
+          </div>
+          <div class="image-box">
+            <img id="generatedImg" alt="Generated">
+            <p>Generated</p>
+          </div>
+          <div class="image-box">
+            <img id="diffImg" alt="Diff">
+            <p>Diff (red = different)</p>
+          </div>
+        </div>
+
+        <div class="preview-container" id="previewContainer" style="display: none;">
+          <div class="preview-header">Live Preview</div>
+          <div class="viewport-controls">
+            <label>Viewport:</label>
+            <button class="viewport-btn active" onclick="setViewport(1440)" data-width="1440">Desktop (1440px)</button>
+            <button class="viewport-btn" onclick="setViewport(1024)" data-width="1024">Tablet L (1024px)</button>
+            <button class="viewport-btn" onclick="setViewport(768)" data-width="768">Tablet (768px)</button>
+            <button class="viewport-btn" onclick="setViewport(375)" data-width="375">Mobile (375px)</button>
+            <span class="viewport-size" id="viewportSize">1440px</span>
+          </div>
+          <div class="preview-content">
+            <div class="preview-frame-wrapper" id="previewWrapper" style="width: 1440px;">
+              <iframe id="previewFrame"></iframe>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <script>
+    let currentBlock = null;
+    let iterations = 0;
+    let originalScreenshot = null;
+    let currentViewport = 1440;
+
+    // Set viewport size for preview
+    function setViewport(width) {
+      currentViewport = width;
+      document.getElementById('previewWrapper').style.width = width + 'px';
+      document.getElementById('viewportSize').textContent = width + 'px';
+
+      // Update active button
+      document.querySelectorAll('.viewport-btn').forEach(btn => {
+        btn.classList.remove('active');
+        if (parseInt(btn.dataset.width) === width) {
+          btn.classList.add('active');
+        }
+      });
+    }
+
+    // Handle screenshot file selection
+    document.getElementById('screenshot').addEventListener('change', function(e) {
+      const file = e.target.files[0];
+      if (file) {
+        const reader = new FileReader();
+        reader.onload = function(e) {
+          document.getElementById('screenshotImg').src = e.target.result;
+          document.getElementById('screenshotPreview').style.display = 'block';
+          originalScreenshot = file;
+        };
+        reader.readAsDataURL(file);
+      }
+    });
+
+    function setStatus(message, type) {
+      const status = document.getElementById('status');
+      status.textContent = message;
+      status.className = 'status ' + type;
+      status.style.display = 'block';
+    }
+
+    function switchTab(tab) {
+      document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
+      document.querySelectorAll('.tab-content').forEach(t => t.classList.remove('active'));
+      document.querySelector('.tab:nth-child(' + (tab === 'html' ? 1 : tab === 'css' ? 2 : 3) + ')').classList.add('active');
+      document.getElementById(tab + 'Tab').classList.add('active');
+    }
+
+    function updatePreview() {
+      if (!currentBlock) return;
+
+      // Transform the JS to extract the decorate function and call it
+      // EDS blocks use: export default function decorate(block) { ... }
+      // We need to make it callable in the preview
+      let jsCode = currentBlock.js || '';
+
+      // Remove 'export default' to make the function accessible
+      jsCode = jsCode.replace(/export\\s+default\\s+function\\s+decorate/g, 'function decorate');
+      jsCode = jsCode.replace(/export\\s+default\\s+decorate/g, '');
+
+      const previewHtml = \`<!DOCTYPE html>
+<html>
+<head>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; }
+    \${currentBlock.css}
+  </style>
+</head>
+<body>
+  \${currentBlock.html}
+  <script>
+    \${jsCode}
+    // Auto-run decorate if it exists (EDS blocks export a decorate function)
+    if (typeof decorate === 'function') {
+      const block = document.querySelector('.block');
+      if (block) {
+        try {
+          decorate(block);
+        } catch (e) {
+          console.error('Error running decorate:', e);
+        }
+      }
+    }
+  <\\/script>
+</body>
+</html>\`;
+
+      const iframe = document.getElementById('previewFrame');
+      iframe.srcdoc = previewHtml;
+      document.getElementById('previewContainer').style.display = 'block';
+    }
+
+    async function generate() {
+      const url = document.getElementById('url').value;
+      const screenshot = document.getElementById('screenshot').files[0];
+      const html = document.getElementById('html').value;
+      const xpath = document.getElementById('xpath').value;
+
+      if (!url || !screenshot || (!html && !xpath)) {
+        setStatus('Please provide URL, screenshot, and either HTML or XPath', 'error');
+        return;
+      }
+
+      setStatus('Generating block...', 'loading');
+      document.getElementById('generateBtn').disabled = true;
+
+      try {
+        const formData = new FormData();
+        formData.append('url', url);
+        formData.append('screenshot', screenshot);
+        if (html) formData.append('html', html);
+        if (xpath) formData.append('xpath', xpath);
+
+        const response = await fetch('/block-generate', {
+          method: 'POST',
+          body: formData
+        });
+
+        // Get response as text first to handle non-JSON responses
+        const responseText = await response.text();
+        let result;
+        try {
+          result = JSON.parse(responseText);
+        } catch (parseError) {
+          // Response is not JSON - show what we got
+          console.error('Non-JSON response:', responseText.substring(0, 500));
+          setStatus('Server returned non-JSON response (status ' + response.status + '): ' + responseText.substring(0, 200), 'error');
+          return;
+        }
+
+        if (result.success) {
+          currentBlock = {
+            html: result.html,
+            css: result.css,
+            js: result.js,
+            blockName: result.blockName
+          };
+          iterations = 1;
+
+          document.getElementById('generatedHtml').textContent = result.html;
+          document.getElementById('generatedCss').textContent = result.css;
+          document.getElementById('generatedJs').textContent = result.js;
+          document.getElementById('refineBtn').disabled = false;
+          document.getElementById('iterationCount').textContent = 'Iteration: ' + iterations;
+
+          updatePreview();
+          setStatus('Block generated successfully!', 'success');
+        } else {
+          setStatus('Error: ' + result.error, 'error');
+        }
+      } catch (error) {
+        setStatus('Error: ' + error.message, 'error');
+      } finally {
+        document.getElementById('generateBtn').disabled = false;
+      }
+    }
+
+    async function refine() {
+      if (!currentBlock || !originalScreenshot) {
+        setStatus('Please generate a block first', 'error');
+        return;
+      }
+
+      const url = document.getElementById('url').value;
+      const html = document.getElementById('html').value;
+      const xpath = document.getElementById('xpath').value;
+      const refinePrompt = document.getElementById('refinePrompt').value;
+
+      setStatus('Refining block (iteration ' + (iterations + 1) + ')...', 'loading');
+      document.getElementById('refineBtn').disabled = true;
+
+      try {
+        const formData = new FormData();
+        formData.append('url', url);
+        formData.append('screenshot', originalScreenshot);
+        if (html) formData.append('html', html);
+        if (xpath) formData.append('xpath', xpath);
+        if (refinePrompt) formData.append('prompt', refinePrompt);
+        formData.append('blockHtml', currentBlock.html);
+        formData.append('blockCss', currentBlock.css);
+        formData.append('blockJs', currentBlock.js);
+        formData.append('blockName', currentBlock.blockName || 'block');
+
+        const response = await fetch('/block-refine', {
+          method: 'POST',
+          body: formData
+        });
+
+        // Get response as text first to handle non-JSON responses
+        const responseText = await response.text();
+        let result;
+        try {
+          result = JSON.parse(responseText);
+        } catch (parseError) {
+          console.error('Non-JSON response:', responseText.substring(0, 500));
+          setStatus('Server returned non-JSON response (status ' + response.status + '): ' + responseText.substring(0, 200), 'error');
+          return;
+        }
+
+        if (result.success) {
+          currentBlock = {
+            html: result.html,
+            css: result.css,
+            js: result.js,
+            blockName: result.blockName
+          };
+          iterations++;
+
+          document.getElementById('generatedHtml').textContent = result.html;
+          document.getElementById('generatedCss').textContent = result.css;
+          document.getElementById('generatedJs').textContent = result.js;
+          document.getElementById('iterationCount').textContent = 'Iteration: ' + iterations;
+
+          // Show diff info
+          if (result.diff) {
+            document.getElementById('diffInfo').style.display = 'block';
+            const scoreEl = document.getElementById('diffScore');
+            scoreEl.textContent = result.diff.score.toFixed(2);
+            scoreEl.className = 'diff-score ' + (result.diff.score < 5 ? 'good' : result.diff.score < 15 ? 'medium' : 'bad');
+            document.getElementById('diffPixels').textContent = result.diff.diffPixels.toLocaleString();
+            document.getElementById('totalPixels').textContent = result.diff.totalPixels.toLocaleString();
+
+            // Show images
+            if (result.diff.diffImageBase64) {
+              document.getElementById('imagesRow').style.display = 'grid';
+              document.getElementById('originalImg').src = document.getElementById('screenshotImg').src;
+              document.getElementById('diffImg').src = 'data:image/png;base64,' + result.diff.diffImageBase64;
+              // Show generated screenshot if available
+              if (result.generatedScreenshot) {
+                document.getElementById('generatedImg').src = 'data:image/png;base64,' + result.generatedScreenshot;
+              }
+            }
+          }
+
+          updatePreview();
+          setStatus(result.refinementApplied ?
+            'Block refined! ' + result.refinementNotes :
+            'No refinement needed - diff below threshold', 'success');
+        } else {
+          setStatus('Error: ' + result.error, 'error');
+        }
+      } catch (error) {
+        setStatus('Error: ' + error.message, 'error');
+      } finally {
+        document.getElementById('refineBtn').disabled = false;
+      }
+    }
+  </script>
+</body>
+</html>`;
+
+  return new Response(html, {
+    status: 200,
+    headers: {
+      'Access-Control-Allow-Origin': env.ALLOWED_ORIGINS || '*',
+      'Content-Type': 'text/html; charset=utf-8',
+    },
+  });
 }
 
 /**
@@ -1407,6 +2814,312 @@ async function handleDebugBboxes(request: Request, env: Env): Promise<Response> 
 }
 
 /**
+ * Debug: Show what we extract for a specific section based on Y-boundaries
+ */
+async function handleDebugSection(request: Request, env: Env): Promise<Response> {
+  try {
+    const body = await request.json() as {
+      url?: string;
+      sectionName?: string;
+      sectionDescription?: string;
+      yStart?: number;
+      yEnd?: number;
+    };
+
+    const { url, sectionName, sectionDescription, yStart, yEnd } = body;
+
+    if (!url || !sectionName || yStart === undefined || yEnd === undefined) {
+      return Response.json(
+        { success: false, error: 'Missing required fields: url, sectionName, yStart, yEnd' },
+        { status: 400, headers: corsHeaders(env) }
+      );
+    }
+
+    if (!env.BROWSER) {
+      return Response.json(
+        { success: false, error: 'Browser Rendering not configured' },
+        { status: 500, headers: corsHeaders(env) }
+      );
+    }
+
+    const browser = await puppeteer.launch(env.BROWSER);
+    try {
+      const page = await browser.newPage();
+      await page.setViewport({ width: 1440, height: 900 });
+      // Set desktop user agent to ensure desktop layout
+      await page.setUserAgent('Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36');
+      await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 60000 });
+      await new Promise(r => setTimeout(r, 2000));
+
+      // Dismiss cookie consent banners before screenshots
+      try {
+        await dismissCookieBanners(page);
+      } catch (e) {
+        console.log('Cookie dismissal error:', e);
+      }
+
+      // Scroll to load lazy content
+      await page.evaluate(async () => {
+        const delay = (ms: number) => new Promise(r => setTimeout(r, ms));
+        for (let pass = 0; pass < 2; pass++) {
+          const scrollHeight = document.documentElement.scrollHeight;
+          const viewportHeight = window.innerHeight;
+          const scrollStep = viewportHeight * 0.7;
+          let pos = 0;
+          while (pos < scrollHeight) {
+            window.scrollTo(0, pos);
+            await delay(200);
+            pos += scrollStep;
+          }
+          window.scrollTo(0, scrollHeight);
+          await delay(500);
+        }
+        window.scrollTo(0, 0);
+      });
+      await new Promise(r => setTimeout(r, 1500));
+
+      const dimensions = await page.evaluate(() => ({
+        width: document.documentElement.scrollWidth,
+        height: document.documentElement.scrollHeight,
+      }));
+
+      // Find DOM element at Y position (same improved algorithm as generation)
+      const sectionData = await page.evaluate((yS: number, yE: number) => {
+        const targetHeight = yE - yS;
+        window.scrollTo(0, Math.max(0, yS - 100));
+
+        const allElements = document.querySelectorAll('body *');
+        const candidates: { el: Element; score: number; elTop: number; elHeight: number }[] = [];
+
+        for (const el of allElements) {
+          const rect = el.getBoundingClientRect();
+          const elTop = rect.top + window.scrollY;
+          const elBottom = elTop + rect.height;
+
+          if (rect.width < 100 || rect.height < 30) continue;
+          if (['SCRIPT', 'STYLE', 'NOSCRIPT', 'META', 'LINK', 'BR', 'HR'].includes(el.tagName)) continue;
+
+          const overlapStart = Math.max(yS, elTop);
+          const overlapEnd = Math.min(yE, elBottom);
+          const overlap = Math.max(0, overlapEnd - overlapStart);
+
+          if (overlap > 0) {
+            // Score based on how well the element MATCHES the target range
+            const rangeCoverage = overlap / targetHeight;
+
+            // Penalize elements that don't match target size (too large OR too small)
+            const sizeRatio = rect.height / targetHeight;
+            let sizePenalty = 1;
+            if (sizeRatio > 2) {
+              sizePenalty = Math.max(0.2, 1 / Math.sqrt(sizeRatio));
+            } else if (sizeRatio < 0.5) {
+              sizePenalty = Math.max(0.3, sizeRatio * 1.5);
+            }
+
+            // Boundary matching - element should START and END near target
+            const startDiff = Math.abs(elTop - yS) / targetHeight;
+            const endDiff = Math.abs(elBottom - yE) / targetHeight;
+            const boundaryPenalty = Math.max(0.3, 1 - (startDiff + endDiff) * 0.4);
+
+            let score = rangeCoverage * sizePenalty * boundaryPenalty;
+
+            const isSection = ['SECTION', 'ARTICLE', 'MAIN'].includes(el.tagName);
+            if (isSection) score *= 1.15;
+
+            const hasClasses = el.classList.length > 0;
+            if (hasClasses && !['SECTION', 'ARTICLE', 'MAIN'].includes(el.tagName)) {
+              score *= 1.05;
+            }
+
+            candidates.push({ el, score, elTop, elHeight: rect.height });
+          }
+        }
+
+        if (candidates.length === 0) return null;
+
+        candidates.sort((a, b) => b.score - a.score);
+
+        let bestElement = candidates[0].el;
+        let bestScore = candidates[0].score;
+
+        // If best candidate is much larger than target, look for better children
+        const bestRect = bestElement.getBoundingClientRect();
+        if (bestRect.height > targetHeight * 2.5) {
+          const children = bestElement.children;
+          for (const child of children) {
+            const childRect = child.getBoundingClientRect();
+            const childTop = childRect.top + window.scrollY;
+            const childBottom = childTop + childRect.height;
+            const childOverlapStart = Math.max(yS, childTop);
+            const childOverlapEnd = Math.min(yE, childBottom);
+            const childOverlap = Math.max(0, childOverlapEnd - childOverlapStart);
+
+            if (childOverlap > targetHeight * 0.5 && childRect.height < bestRect.height * 0.8) {
+              const childRangeCoverage = childOverlap / targetHeight;
+              const childElementCoverage = childOverlap / childRect.height;
+              const childSizeRatio = childRect.height / targetHeight;
+              const childSizePenalty = childSizeRatio > 2 ? Math.max(0.1, 1 / childSizeRatio) : 1;
+              const childScore = (childRangeCoverage * 0.4 + childElementCoverage * 0.4) * childSizePenalty;
+
+              if (childScore > bestScore * 0.7) {
+                bestElement = child;
+                bestScore = childScore;
+                break;
+              }
+            }
+          }
+        }
+
+        const rect = bestElement.getBoundingClientRect();
+        const bbox = {
+          x: 0,
+          y: rect.top + window.scrollY,
+          width: document.documentElement.scrollWidth,
+          height: rect.height,
+        };
+
+        const html = bestElement.outerHTML;
+        const images: { src: string; alt: string }[] = [];
+
+        // Check <img> tags
+        bestElement.querySelectorAll('img').forEach(img => {
+          const src = img.src || img.dataset.src || '';
+          if (src && !src.startsWith('data:')) {
+            images.push({ src, alt: img.alt || '' });
+          }
+        });
+
+        // CRITICAL: Check background-image on element itself
+        const elStyle = window.getComputedStyle(bestElement);
+        const elBgImage = elStyle.backgroundImage;
+        if (elBgImage && elBgImage !== 'none' && elBgImage.includes('url(')) {
+          const match = elBgImage.match(/url\(['"]?([^'"]+)['"]?\)/);
+          if (match && match[1] && !match[1].startsWith('data:')) {
+            images.push({ src: match[1], alt: 'background (self)' });
+          }
+        }
+
+        // Also check child elements for background images
+        bestElement.querySelectorAll('*').forEach(el => {
+          const style = window.getComputedStyle(el);
+          const bgImage = style.backgroundImage;
+          if (bgImage && bgImage !== 'none' && bgImage.includes('url(')) {
+            const match = bgImage.match(/url\(['"]?([^'"]+)['"]?\)/);
+            if (match && match[1] && !match[1].startsWith('data:')) {
+              images.push({ src: match[1], alt: 'background' });
+            }
+          }
+        });
+
+        return {
+          html: html.substring(0, 10000),
+          images,
+          bbox,
+          selector: bestElement.tagName.toLowerCase() +
+            (bestElement.id ? `#${bestElement.id}` : '') +
+            (bestElement.classList.length > 0 ? `.${Array.from(bestElement.classList).join('.')}` : ''),
+          elementTop: rect.top + window.scrollY,
+          elementHeight: rect.height,
+          score: bestScore,
+          candidateCount: candidates.length,
+        };
+      }, yStart, yEnd);
+
+      // Take cropped screenshot
+      let croppedScreenshot = '';
+      if (sectionData) {
+        try {
+          const screenshotBuffer = await page.screenshot({
+            clip: {
+              x: 0,
+              y: Math.max(0, sectionData.bbox.y),
+              width: Math.min(dimensions.width, 1440),
+              height: Math.min(sectionData.bbox.height, 2000),
+            },
+            type: 'png',
+          }) as Buffer;
+          croppedScreenshot = screenshotBuffer.toString('base64');
+        } catch (e) {
+          console.error('Screenshot failed:', e);
+        }
+      }
+
+      // Return debug HTML page
+      const html = `<!DOCTYPE html>
+<html>
+<head>
+  <title>Debug Section: ${sectionName}</title>
+  <style>
+    body { font-family: system-ui; padding: 20px; max-width: 1400px; margin: 0 auto; }
+    h1 { margin-bottom: 8px; }
+    .section { background: #f5f5f5; padding: 16px; border-radius: 8px; margin: 16px 0; }
+    .section h2 { margin-top: 0; }
+    pre { background: #333; color: #0f0; padding: 12px; border-radius: 6px; overflow-x: auto; white-space: pre-wrap; font-size: 12px; max-height: 400px; overflow-y: auto; }
+    img { max-width: 100%; border: 2px solid #333; }
+    table { border-collapse: collapse; width: 100%; }
+    td, th { border: 1px solid #ccc; padding: 8px; text-align: left; }
+    .warning { background: #fff3cd; padding: 12px; border-radius: 6px; margin: 12px 0; }
+    .success { background: #d4edda; padding: 12px; border-radius: 6px; margin: 12px 0; }
+  </style>
+</head>
+<body>
+  <h1>Debug Section Extraction</h1>
+  <p><strong>URL:</strong> ${url}</p>
+  <p><strong>Section:</strong> ${sectionName}</p>
+  <p><strong>Y-Boundaries:</strong> ${yStart}px - ${yEnd}px (height: ${yEnd - yStart}px)</p>
+
+  ${sectionData ? `
+  <div class="success">
+    <strong>Element Found:</strong> ${sectionData.selector}<br>
+    <strong>Element Y:</strong> ${Math.round(sectionData.elementTop)}px - ${Math.round(sectionData.elementTop + sectionData.elementHeight)}px (height: ${Math.round(sectionData.elementHeight)}px)<br>
+    <strong>Target Y:</strong> ${yStart}px - ${yEnd}px (height: ${yEnd - yStart}px)<br>
+    <strong>Match Score:</strong> ${(sectionData.score * 100).toFixed(1)}%<br>
+    <strong>Candidates Evaluated:</strong> ${sectionData.candidateCount || 'N/A'}
+  </div>
+  ` : `
+  <div class="warning">
+    <strong>No element found at Y position ${yStart}-${yEnd}</strong>
+  </div>
+  `}
+
+  <div class="section">
+    <h2>Cropped Screenshot Sent to Claude</h2>
+    ${croppedScreenshot ? `<img src="data:image/png;base64,${croppedScreenshot}" />` : '<p>No screenshot captured</p>'}
+  </div>
+
+  <div class="section">
+    <h2>Extracted Images (${sectionData?.images.length || 0})</h2>
+    <table>
+      <tr><th>Type</th><th>URL</th></tr>
+      ${sectionData?.images.map(img => `<tr><td>${img.alt || 'img'}</td><td style="word-break: break-all; font-size: 11px;">${img.src}</td></tr>`).join('') || '<tr><td colspan="2">No images found</td></tr>'}
+    </table>
+  </div>
+
+  <div class="section">
+    <h2>Extracted HTML (first 10KB)</h2>
+    <pre>${(sectionData?.html || 'No HTML extracted').replace(/</g, '&lt;').replace(/>/g, '&gt;')}</pre>
+  </div>
+</body>
+</html>`;
+
+      return new Response(html, {
+        status: 200,
+        headers: { 'Content-Type': 'text/html; charset=utf-8' },
+      });
+    } finally {
+      await browser.close();
+    }
+  } catch (error) {
+    console.error('Debug section failed:', error);
+    const message = error instanceof Error ? error.message : 'Unknown error';
+    return Response.json(
+      { success: false, error: message },
+      { status: 500, headers: corsHeaders(env) }
+    );
+  }
+}
+
+/**
  * Batch generation UI for multiple blocks
  */
 function handleBatchUI(env: Env): Response {
@@ -1515,10 +3228,51 @@ function handleBatchUI(env: Env): Response {
               <strong>\${block.name} <span class="badge \${block.priority}">\${block.priority}</span> <span class="badge type">\${block.type}</span></strong>
               <div class="description">\${block.description}</div>
               <span class="selector" style="color: #17a2b8;">style: \${block.style}</span>
+              <span class="selector" style="color: #666; margin-left: 12px;">Y: \${block.yStart}-\${block.yEnd}px</span>
             </div>
+            <button class="debug-btn" data-index="\${i}" style="margin-right: 12px; padding: 4px 12px; font-size: 12px; background: #6c757d; color: white; border: none; border-radius: 4px; cursor: pointer;">Debug</button>
             <span class="status">Ready</span>
           \`;
           blocksContainer.appendChild(div);
+        });
+
+        // Add debug button handlers
+        document.querySelectorAll('.debug-btn').forEach(btn => {
+          btn.onclick = async (e) => {
+            e.stopPropagation();
+            const idx = parseInt(btn.dataset.index);
+            const block = identifiedBlocks[idx];
+            const pageUrl = document.getElementById('pageUrl').value;
+
+            btn.textContent = 'Loading...';
+            btn.disabled = true;
+
+            try {
+              const response = await fetch('/debug/section', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                  url: pageUrl,
+                  sectionName: block.name,
+                  sectionDescription: block.description,
+                  yStart: block.yStart,
+                  yEnd: block.yEnd
+                })
+              });
+
+              const html = await response.text();
+              const newWindow = window.open('', '_blank');
+              if (newWindow) {
+                newWindow.document.write(html);
+                newWindow.document.close();
+              }
+            } catch (err) {
+              alert('Debug failed: ' + err.message);
+            } finally {
+              btn.textContent = 'Debug';
+              btn.disabled = false;
+            }
+          };
         });
 
         startAllBtn.style.display = 'block';
@@ -1568,7 +3322,9 @@ function handleBatchUI(env: Env): Response {
           const requestBody = {
             url: pageUrl,
             sectionDescription: block.description,
-            sectionName: block.name
+            sectionName: block.name,
+            yStart: block.yStart,
+            yEnd: block.yEnd
           };
           const response = await fetch('/preview', {
             method: 'POST',
@@ -1644,7 +3400,7 @@ async function parseRequestBody(request: Request): Promise<BlockRequest> {
     );
   }
 
-  const { url, selector, boundingBox, siblingSelectors, sectionDescription, sectionName } = body as Record<string, unknown>;
+  const { url, selector, boundingBox, siblingSelectors, sectionDescription, sectionName, yStart, yEnd } = body as Record<string, unknown>;
 
   if (typeof url !== 'string' || !url.trim()) {
     throw new BlockGeneratorError(
@@ -1698,6 +3454,10 @@ async function parseRequestBody(request: Request): Promise<BlockRequest> {
     if (parsedSiblings.length === 0) parsedSiblings = undefined;
   }
 
+  // Parse Y-boundaries if provided
+  const parsedYStart = typeof yStart === 'number' ? yStart : undefined;
+  const parsedYEnd = typeof yEnd === 'number' ? yEnd : undefined;
+
   return {
     url: url.trim(),
     selector: parsedSelector,
@@ -1705,6 +3465,8 @@ async function parseRequestBody(request: Request): Promise<BlockRequest> {
     siblingSelectors: parsedSiblings,
     sectionDescription: parsedSectionDescription,
     sectionName: parsedSectionName,
+    yStart: parsedYStart,
+    yEnd: parsedYEnd,
   };
 }
 

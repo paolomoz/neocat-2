@@ -48,7 +48,8 @@ export interface EnhancedBlockCode {
  */
 export async function describeComponent(
   screenshotBase64: string,
-  config: AnthropicConfig
+  config: AnthropicConfig,
+  imageMediaType: 'image/png' | 'image/jpeg' = 'image/png'
 ): Promise<ComponentDescription> {
   const prompt = `Analyze this web component screenshot in detail.
 
@@ -99,7 +100,7 @@ Return as JSON:
 
 Return ONLY the JSON object.`;
 
-  const response = await callClaude(screenshotBase64, prompt, config);
+  const response = await callClaude(screenshotBase64, prompt, config, imageMediaType);
 
   try {
     const match = response.match(/\{[\s\S]*\}/);
@@ -316,7 +317,8 @@ export async function generateCodeEnhanced(
   description: ComponentDescription,
   extractedContent: ExtractedContent,
   config: AnthropicConfig,
-  extractedCssStyles?: string
+  extractedCssStyles?: string,
+  imageMediaType: 'image/png' | 'image/jpeg' = 'image/png'
 ): Promise<EnhancedBlockCode> {
   // Build a rich prompt with all context
   const contentSummary = `
@@ -397,7 +399,7 @@ Return JSON:
 
 Return ONLY the JSON object.`;
 
-  const response = await callClaude(screenshotBase64, prompt, config, 8192);
+  const response = await callClaude(screenshotBase64, prompt, config, imageMediaType, 8192);
 
   try {
     // Try code block first
@@ -446,10 +448,12 @@ export async function generateBlockEnhanced(
   baseUrl: string,
   config: AnthropicConfig,
   extractedCssStyles?: string,
-  liveImages?: LiveImage[]
+  liveImages?: LiveImage[],
+  imageMediaType: 'image/png' | 'image/jpeg' = 'image/png'
 ): Promise<EnhancedBlockCode> {
+  console.log(`generateBlockEnhanced: received imageMediaType=${imageMediaType}`);
   console.log('Step 1: Describing component...');
-  const description = await describeComponent(screenshotBase64, config);
+  const description = await describeComponent(screenshotBase64, config, imageMediaType);
   console.log(`  Component type: ${description.componentType}`);
   console.log(`  Layout: ${description.structure.layout}`);
 
@@ -483,7 +487,7 @@ export async function generateBlockEnhanced(
   if (extractedCssStyles) {
     console.log('  Including extracted CSS styles in generation');
   }
-  const block = await generateCodeEnhanced(screenshotBase64, description, content, config, extractedCssStyles);
+  const block = await generateCodeEnhanced(screenshotBase64, description, content, config, extractedCssStyles, imageMediaType);
   console.log(`  Generated block: ${block.blockName}`);
 
   return block;
@@ -496,8 +500,10 @@ async function callClaude(
   imageBase64: string,
   prompt: string,
   config: AnthropicConfig,
+  imageMediaType: 'image/png' | 'image/jpeg' = 'image/png',
   maxTokens: number = 4096
 ): Promise<string> {
+  console.log(`callClaude: using media type ${imageMediaType}, image length ${imageBase64.length}`);
   let response: Response;
 
   if (config.useBedrock && config.bedrockToken) {
@@ -518,7 +524,7 @@ async function callClaude(
           {
             role: 'user',
             content: [
-              { type: 'image', source: { type: 'base64', media_type: 'image/png', data: imageBase64 } },
+              { type: 'image', source: { type: 'base64', media_type: imageMediaType, data: imageBase64 } },
               { type: 'text', text: prompt },
             ],
           },
@@ -540,7 +546,7 @@ async function callClaude(
           {
             role: 'user',
             content: [
-              { type: 'image', source: { type: 'base64', media_type: 'image/png', data: imageBase64 } },
+              { type: 'image', source: { type: 'base64', media_type: imageMediaType, data: imageBase64 } },
               { type: 'text', text: prompt },
             ],
           },
