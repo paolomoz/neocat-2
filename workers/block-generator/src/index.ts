@@ -8,6 +8,15 @@ import {
   GitHubPushResponse,
   DACreatePageRequest,
   DACreatePageResponse,
+  BlockVariantPushRequest,
+  BlockVariantPushResponse,
+  BlockVariant,
+  BlockFinalizeRequest,
+  BlockFinalizeResponse,
+  BlockCleanupRequest,
+  BlockCleanupResponse,
+  GitHubConfig,
+  DAConfig,
 } from './types';
 import { fetchPage } from './fetcher';
 import { parseHTMLDocument, getElement } from './parser';
@@ -25,6 +34,7 @@ import { detectBlocks, captureBlockScreenshot, DetectedBlock as BBoxBlock, Bound
 import { detectBlocksHybrid, ClassifiedBlock, HybridDetectionResult } from './hybrid-detector';
 import { analyzePage, PageAnalysisResult, IdentifiedSection } from './page-analyzer';
 import { refineBlock, renderBlockToScreenshot, BlockCode } from './block-refiner';
+import { getDAToken, clearCachedToken } from './da-token-service';
 import puppeteer, { Page } from '@cloudflare/puppeteer';
 
 /**
@@ -100,6 +110,31 @@ async function compressImageIfNeeded(
     console.log(`Compressed image to ${(newSize / 1024 / 1024).toFixed(2)}MB`);
 
     return { data: compressedBase64, mediaType: 'image/jpeg' };
+  } finally {
+    await page.close();
+  }
+}
+
+/**
+ * Capture screenshot from a URL (e.g., EDS preview URL)
+ * Waits for page to load and captures viewport
+ */
+async function captureUrlScreenshot(
+  browser: Browser,
+  url: string,
+  viewport: { width: number; height: number }
+): Promise<string> {
+  const page = await browser.newPage();
+  try {
+    await page.setViewport(viewport);
+    await page.goto(url, { waitUntil: 'networkidle0', timeout: 30000 });
+
+    // Wait a bit for any JS decoration to complete
+    await new Promise(r => setTimeout(r, 1000));
+
+    // Take screenshot
+    const screenshotBuffer = await page.screenshot({ type: 'png' }) as Buffer;
+    return screenshotBuffer.toString('base64');
   } finally {
     await page.close();
   }
@@ -284,6 +319,23 @@ export default {
     // Block DA endpoint (create page in DA Admin)
     if (url.pathname === '/block-da' && request.method === 'POST') {
       return handleBlockDA(request, env);
+    }
+
+    // EDS Preview Flow endpoints
+    if (url.pathname === '/block-variant-push' && request.method === 'POST') {
+      return handleBlockVariantPush(request, env);
+    }
+
+    if (url.pathname === '/block-finalize' && request.method === 'POST') {
+      return handleBlockFinalize(request, env);
+    }
+
+    if (url.pathname === '/block-cleanup' && request.method === 'POST') {
+      return handleBlockCleanup(request, env);
+    }
+
+    if (url.pathname === '/session-id' && request.method === 'GET') {
+      return Response.json({ sessionId: generateSessionId() }, { headers: corsHeaders(env) });
     }
 
     // Debug endpoint to check config
@@ -2044,6 +2096,7 @@ async function handleBlockRefine(request: Request, env: Env): Promise<Response> 
 /**
  * Handle block-winner endpoint: select the best block from multiple options using Claude Vision
  * Receives original screenshot + array of blocks (latest iteration per option)
+ * If blocks have previewUrl, captures screenshots from EDS preview instead of local rendering
  * Returns the winning block with reasoning
  */
 async function handleBlockWinner(request: Request, env: Env): Promise<Response> {
@@ -2060,8 +2113,8 @@ async function handleBlockWinner(request: Request, env: Env): Promise<Response> 
       );
     }
 
-    // Parse blocks array
-    let blocks: Array<{ html: string; css: string; js: string; blockName?: string; optionIndex: number }>;
+    // Parse blocks array - now includes optional previewUrl
+    let blocks: Array<{ html: string; css: string; js: string; blockName?: string; optionIndex: number; previewUrl?: string }>;
     try {
       blocks = JSON.parse(blocksJson);
     } catch {
@@ -2102,19 +2155,39 @@ async function handleBlockWinner(request: Request, env: Env): Promise<Response> 
     const browser = await launchBrowserWithRetry(env.BROWSER);
 
     try {
-      // Render each block and capture screenshots
-      console.log(`Rendering ${blocks.length} blocks for comparison...`);
+      // Capture screenshots - either from EDS preview URLs or local rendering
+      console.log(`Capturing ${blocks.length} blocks for comparison...`);
       const renderedScreenshots: string[] = [];
 
       for (let i = 0; i < blocks.length; i++) {
         const block = blocks[i];
-        console.log(`  Rendering block ${i + 1}/${blocks.length}...`);
-        const screenshot = await renderBlockToScreenshot(
-          browser,
-          { html: block.html, css: block.css, js: block.js, blockName: block.blockName },
-          { width: 1440, height: 900 }
-        );
-        renderedScreenshots.push(screenshot);
+
+        // If EDS preview URL is available, capture from that
+        if (block.previewUrl) {
+          console.log(`  Capturing EDS preview ${i + 1}/${blocks.length}: ${block.previewUrl}`);
+          try {
+            const screenshot = await captureUrlScreenshot(browser, block.previewUrl, { width: 1440, height: 900 });
+            renderedScreenshots.push(screenshot);
+          } catch (edsErr) {
+            console.warn(`  EDS capture failed, falling back to local render:`, edsErr);
+            // Fallback to local rendering if EDS preview fails
+            const screenshot = await renderBlockToScreenshot(
+              browser,
+              { html: block.html, css: block.css, js: block.js, blockName: block.blockName },
+              { width: 1440, height: 900 }
+            );
+            renderedScreenshots.push(screenshot);
+          }
+        } else {
+          // No EDS URL, render locally
+          console.log(`  Rendering block ${i + 1}/${blocks.length} locally...`);
+          const screenshot = await renderBlockToScreenshot(
+            browser,
+            { html: block.html, css: block.css, js: block.js, blockName: block.blockName },
+            { width: 1440, height: 900 }
+          );
+          renderedScreenshots.push(screenshot);
+        }
       }
 
       // Compress images if needed for Claude API
@@ -2777,6 +2850,21 @@ function handleBlockTestUI(env: Env): Response {
           <label for="refinePrompt">Refine Instructions (optional)</label>
           <textarea id="refinePrompt" placeholder="E.g., 'Fix the background gradient - it should be darker' or 'The button should be rounded with more padding'" style="min-height: 60px;"></textarea>
         </div>
+
+        <details style="margin-bottom: 15px; background: #f8f9fa; padding: 12px; border-radius: 6px;">
+          <summary style="cursor: pointer; font-weight: 500; color: #555;">EDS Preview Configuration</summary>
+          <div style="margin-top: 12px;">
+            <div class="form-group" style="margin-bottom: 10px;">
+              <label for="cfg-gh-url">GitHub Repository URL</label>
+              <input type="text" id="cfg-gh-url" placeholder="https://github.com/owner/repo">
+            </div>
+            <div style="margin-top: 10px; font-size: 11px; color: #888;">
+              Session: <span id="sessionIdDisplay">Not started</span>
+              <br>GitHub token configured in backend
+            </div>
+          </div>
+        </details>
+
         <div class="button-group">
           <button id="generateBtn" onclick="generate()">Generate Block</button>
           <button id="refineBtn" class="refine" onclick="refine()" disabled>Refine</button>
@@ -2791,6 +2879,10 @@ function handleBlockTestUI(env: Env): Response {
           <h3>🏆 <span id="winnerTitle">Winner</span></h3>
           <div class="reasoning" id="winnerReasoning"></div>
           <div class="scores" id="winnerScores"></div>
+          <div id="finalizeSection" style="display: none; margin-top: 12px; padding-top: 12px; border-top: 1px solid #ddd;">
+            <button id="finalizeBtn" class="winner" onclick="finalizeWinner()" style="background: #28a745;">Finalize & Merge Winner</button>
+            <span id="finalizeStatus" style="margin-left: 10px; font-size: 13px; color: #666;"></span>
+          </div>
         </div>
 
         <div id="screenshotPreview" style="margin-top: 15px; display: none;">
@@ -2809,6 +2901,10 @@ function handleBlockTestUI(env: Env): Response {
         <div class="iteration-tabs" id="iterationTabs" style="display: none;">
           <span class="iteration-label">Iterations:</span>
           <div id="iterationTabsContainer" style="display: flex; gap: 6px;"></div>
+        </div>
+        <div id="edsPreviewBar" style="display: none; background: #e8f5e9; padding: 8px 12px; border-radius: 4px; margin-bottom: 10px; font-size: 13px;">
+          <strong>EDS Preview:</strong> <a id="edsPreviewUrl" href="#" target="_blank" style="color: #2e7d32; word-break: break-all;"></a>
+          <span id="edsPreviewStatus" style="margin-left: 10px; color: #666;"></span>
         </div>
         <div class="tabs">
           <div class="tab active" onclick="switchTab('html')">HTML</div>
@@ -2837,7 +2933,7 @@ function handleBlockTestUI(env: Env): Response {
         </div>
 
         <div class="preview-container" id="previewContainer" style="display: none;">
-          <div class="preview-header">Live Preview</div>
+          <div class="preview-header">Live Preview <button onclick="reloadPreview()" style="margin-left: 10px; padding: 2px 8px; font-size: 12px; cursor: pointer;">↻ Reload</button></div>
           <div class="viewport-controls">
             <label>Viewport:</label>
             <button class="viewport-btn active" onclick="setViewport(1440)" data-width="1440">Desktop (1440px)</button>
@@ -2848,7 +2944,7 @@ function handleBlockTestUI(env: Env): Response {
           </div>
           <div class="preview-content">
             <div class="preview-frame-wrapper" id="previewWrapper" style="width: 1440px;">
-              <iframe id="previewFrame"></iframe>
+              <iframe id="previewFrame" sandbox="allow-scripts allow-same-origin allow-forms allow-popups" allow="scripts"></iframe>
             </div>
           </div>
         </div>
@@ -2920,6 +3016,67 @@ function handleBlockTestUI(env: Env): Response {
     let originalScreenshot = null;
     let currentViewport = 1440;
     let isGenerating = false;         // Prevent multiple generate calls
+    let sessionId = null;             // EDS preview session ID
+    let edsPreviewEnabled = false;    // Whether to push variants to GitHub/DA
+    let selectedWinner = null;        // { option: 1-3, iteration: 1-N } of selected winner
+
+    // Parse GitHub URL: https://github.com/owner/repo -> { owner, repo }
+    function parseGitHubUrl(url) {
+      if (!url) return null;
+      const match = url.match(/github\\.com\\/([^\\/]+)\\/([^\\/]+)/);
+      if (match) return { owner: match[1], repo: match[2].replace(/\\.git$/, '') };
+      return null;
+    }
+
+    // Get EDS config from form (DA org/site derived from GitHub owner/repo, token from backend)
+    function getEdsConfig() {
+      const ghUrl = document.getElementById('cfg-gh-url').value;
+      const ghParsed = parseGitHubUrl(ghUrl);
+
+      // EDS preview is enabled if we have GitHub URL (token comes from backend)
+      edsPreviewEnabled = !!ghParsed;
+
+      return {
+        github: ghParsed ? { owner: ghParsed.owner, repo: ghParsed.repo } : null,
+        // DA org/site = GitHub owner/repo, basePath is always /drafts/gen
+        da: ghParsed ? { org: ghParsed.owner, site: ghParsed.repo, basePath: '/drafts/gen' } : null
+      };
+    }
+
+    // Push a variant to GitHub and DA, return preview URL
+    async function pushVariant(block, optionNum, iterationNum) {
+      const config = getEdsConfig();
+      if (!edsPreviewEnabled) return null;
+
+      try {
+        const res = await fetch('/block-variant-push', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            sessionId: sessionId,
+            blockName: block.blockName || 'block',
+            option: optionNum,
+            iteration: iterationNum,
+            html: block.html,
+            css: block.css,
+            js: block.js,
+            github: config.github,
+            da: config.da
+          })
+        });
+
+        const data = await res.json();
+        if (data.success) {
+          return data.variant;
+        } else {
+          console.error('Push variant failed:', data.error);
+          return null;
+        }
+      } catch (err) {
+        console.error('Push variant error:', err);
+        return null;
+      }
+    }
 
     // Set viewport size for preview
     function setViewport(width) {
@@ -3012,6 +3169,10 @@ function handleBlockTestUI(env: Env): Response {
       const iterations = blocks[activeOption];
       const block = iterations[activeIteration];
 
+      const previewBar = document.getElementById('edsPreviewBar');
+      const previewUrlEl = document.getElementById('edsPreviewUrl');
+      const previewStatusEl = document.getElementById('edsPreviewStatus');
+
       if (block && !block.loading) {
         document.getElementById('generatedHtml').textContent = block.html;
         document.getElementById('generatedCss').textContent = block.css;
@@ -3020,6 +3181,16 @@ function handleBlockTestUI(env: Env): Response {
         document.getElementById('refineBtn').disabled = isGenerating;
         document.getElementById('saveGithubBtn').disabled = false;
         document.getElementById('saveDaBtn').disabled = false;
+
+        // Show EDS preview URL if available
+        if (block.previewUrl) {
+          previewBar.style.display = 'block';
+          previewUrlEl.href = block.previewUrl;
+          previewUrlEl.textContent = block.previewUrl;
+          previewStatusEl.textContent = block.branch ? '(branch: ' + block.branch + ')' : '';
+        } else {
+          previewBar.style.display = 'none';
+        }
       } else if (block && block.loading) {
         document.getElementById('generatedHtml').textContent = 'Generating...';
         document.getElementById('generatedCss').textContent = '';
@@ -3027,6 +3198,7 @@ function handleBlockTestUI(env: Env): Response {
         document.getElementById('refineBtn').disabled = true;
         document.getElementById('saveGithubBtn').disabled = true;
         document.getElementById('saveDaBtn').disabled = true;
+        previewBar.style.display = 'none';
       } else {
         document.getElementById('generatedHtml').textContent = 'No block generated yet';
         document.getElementById('generatedCss').textContent = '';
@@ -3034,6 +3206,20 @@ function handleBlockTestUI(env: Env): Response {
         document.getElementById('refineBtn').disabled = true;
         document.getElementById('saveGithubBtn').disabled = true;
         document.getElementById('saveDaBtn').disabled = true;
+        previewBar.style.display = 'none';
+      }
+    }
+
+    function reloadPreview() {
+      const iframe = document.getElementById('previewFrame');
+      const currentBlock = blocks[activeOption]?.[activeIteration];
+      if (currentBlock?.previewUrl && edsPreviewEnabled) {
+        // Force reload by clearing and re-setting src
+        iframe.removeAttribute('srcdoc');
+        iframe.src = '';
+        setTimeout(() => {
+          iframe.src = currentBlock.previewUrl;
+        }, 100);
       }
     }
 
@@ -3041,6 +3227,22 @@ function handleBlockTestUI(env: Env): Response {
       const currentBlock = blocks[activeOption][activeIteration];
       if (!currentBlock || currentBlock.loading) return;
 
+      const iframe = document.getElementById('previewFrame');
+      document.getElementById('previewContainer').style.display = 'block';
+
+      // If EDS preview URL is available, use it for real AEM rendering
+      if (currentBlock.previewUrl && edsPreviewEnabled) {
+        // Remove srcdoc attribute so src takes effect
+        iframe.removeAttribute('srcdoc');
+        // Add delay to allow CDN to propagate GitHub changes
+        // Block files need time to be available on aem.page CDN
+        setTimeout(() => {
+          iframe.src = currentBlock.previewUrl;
+        }, 2000); // 2 second delay for CDN propagation
+        return;
+      }
+
+      // Fallback: local rendering with srcdoc
       // Transform the JS to extract the decorate function and call it
       // EDS blocks use: export default function decorate(block) { ... }
       // We need to make it callable in the preview
@@ -3079,9 +3281,8 @@ function handleBlockTestUI(env: Env): Response {
 </body>
 </html>\`;
 
-      const iframe = document.getElementById('previewFrame');
+      iframe.src = '';
       iframe.srcdoc = previewHtml;
-      document.getElementById('previewContainer').style.display = 'block';
     }
 
     async function generate() {
@@ -3102,6 +3303,7 @@ function handleBlockTestUI(env: Env): Response {
       blocks = [[], [], []];
       activeOption = 0;
       activeIteration = 0;
+      sessionId = null;
 
       // Show option tabs and set all to loading state
       document.getElementById('optionTabs').style.display = 'flex';
@@ -3111,7 +3313,24 @@ function handleBlockTestUI(env: Env): Response {
         tab.className = 'option-tab loading' + (i === 0 ? ' active' : '');
       }
 
-      setStatus('Generating 3 options × 3 iterations (9 total)...', 'loading');
+      // Get session ID for EDS preview
+      getEdsConfig(); // Sets edsPreviewEnabled
+      if (edsPreviewEnabled) {
+        try {
+          const sessionRes = await fetch('/session-id');
+          const sessionData = await sessionRes.json();
+          sessionId = sessionData.sessionId;
+          document.getElementById('sessionIdDisplay').textContent = sessionId;
+          setStatus('Session ' + sessionId + ' - Generating 3 options × 3 iterations...', 'loading');
+        } catch (e) {
+          console.error('Failed to get session ID:', e);
+          edsPreviewEnabled = false;
+          setStatus('Generating 3 options × 3 iterations (9 total)...', 'loading');
+        }
+      } else {
+        document.getElementById('sessionIdDisplay').textContent = 'Disabled (no GitHub URL)';
+        setStatus('Generating 3 options × 3 iterations (9 total)...', 'loading');
+      }
       document.getElementById('generateBtn').disabled = true;
       document.getElementById('refineBtn').disabled = true;
       document.getElementById('winnerBtn').disabled = true;
@@ -3202,6 +3421,16 @@ function handleBlockTestUI(env: Env): Response {
 
           // Generate initial
           const initialBlock = await generateInitial(optionIndex);
+
+          // Push to GitHub/DA for EDS preview
+          if (edsPreviewEnabled && sessionId) {
+            const variant = await pushVariant(initialBlock, optionIndex + 1, 1);
+            if (variant) {
+              initialBlock.previewUrl = variant.previewUrl;
+              initialBlock.branch = variant.branch;
+              initialBlock.daPath = variant.daPath;
+            }
+          }
           updateUI(optionIndex, 0, initialBlock);
 
           // Start 2 refinements sequentially (each depends on previous)
@@ -3209,6 +3438,16 @@ function handleBlockTestUI(env: Env): Response {
             updateUI(optionIndex, refineIter, null, true);
             try {
               const refinedBlock = await refineBlock(optionIndex, refineIter);
+
+              // Push to GitHub/DA for EDS preview
+              if (edsPreviewEnabled && sessionId) {
+                const variant = await pushVariant(refinedBlock, optionIndex + 1, refineIter + 1);
+                if (variant) {
+                  refinedBlock.previewUrl = variant.previewUrl;
+                  refinedBlock.branch = variant.branch;
+                  refinedBlock.daPath = variant.daPath;
+                }
+              }
               updateUI(optionIndex, refineIter, refinedBlock);
             } catch (refineError) {
               console.error('Refine error for option ' + optionIndex + ' iter ' + refineIter + ':', refineError);
@@ -3305,12 +3544,24 @@ function handleBlockTestUI(env: Env): Response {
         }
 
         if (result.success) {
-          blocks[activeOption][newIterIndex] = {
+          const newBlock = {
             html: result.html,
             css: result.css,
             js: result.js,
             blockName: result.blockName
           };
+
+          // Push to GitHub/DA for EDS preview
+          if (edsPreviewEnabled && sessionId) {
+            const variant = await pushVariant(newBlock, activeOption + 1, newIterIndex + 1);
+            if (variant) {
+              newBlock.previewUrl = variant.previewUrl;
+              newBlock.branch = variant.branch;
+              newBlock.daPath = variant.daPath;
+            }
+          }
+
+          blocks[activeOption][newIterIndex] = newBlock;
 
           updateIterationTabs();
           displayCurrentBlock();
@@ -3352,7 +3603,9 @@ function handleBlockTestUI(env: Env): Response {
               css: latestBlock.css,
               js: latestBlock.js,
               blockName: latestBlock.blockName,
-              optionIndex: i
+              optionIndex: i,
+              // Include EDS preview URL for real AEM rendering comparison
+              previewUrl: latestBlock.previewUrl || null
             });
           }
         }
@@ -3411,6 +3664,21 @@ function handleBlockTestUI(env: Env): Response {
           activeOption = winnerOptionIndex;
           activeIteration = winnerIterationIndex;
 
+          // Store the winner for finalization
+          selectedWinner = {
+            option: winnerOptionIndex + 1,
+            iteration: winnerIterationIndex + 1
+          };
+
+          // Show finalize button if EDS preview is enabled
+          const finalizeSection = document.getElementById('finalizeSection');
+          if (edsPreviewEnabled && sessionId) {
+            finalizeSection.style.display = 'block';
+            document.getElementById('finalizeStatus').textContent = '';
+          } else {
+            finalizeSection.style.display = 'none';
+          }
+
           // Update UI to show the winner
           document.querySelectorAll('.option-tab').forEach((t, i) => {
             t.classList.remove('active');
@@ -3428,6 +3696,73 @@ function handleBlockTestUI(env: Env): Response {
         setStatus('Error picking winner: ' + error.message, 'error');
       } finally {
         document.getElementById('winnerBtn').disabled = false;
+      }
+    }
+
+    async function finalizeWinner() {
+      if (!selectedWinner || !sessionId || !edsPreviewEnabled) {
+        setStatus('No winner selected or EDS preview not enabled', 'error');
+        return;
+      }
+
+      const winnerBlock = blocks[selectedWinner.option - 1][selectedWinner.iteration - 1];
+      if (!winnerBlock || winnerBlock.loading) {
+        setStatus('Winner block not available', 'error');
+        return;
+      }
+
+      const config = getEdsConfig();
+      const btn = document.getElementById('finalizeBtn');
+      const statusEl = document.getElementById('finalizeStatus');
+
+      btn.disabled = true;
+      btn.textContent = 'Finalizing...';
+      statusEl.textContent = 'Merging winner branch and cleaning up...';
+      setStatus('Finalizing winner: merging to main...', 'loading');
+
+      try {
+        const res = await fetch('/block-finalize', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            sessionId: sessionId,
+            blockName: winnerBlock.blockName || 'block',
+            winner: selectedWinner,
+            github: config.github,
+            da: config.da,
+            cleanup: true
+          })
+        });
+
+        const data = await res.json();
+
+        if (data.success) {
+          let statusHtml = 'Merged to <strong>' + data.merged.into + '</strong>!<br>';
+          statusHtml += '<a href="' + data.merged.commitUrl + '" target="_blank" style="color: #007bff;">View GitHub commit →</a>';
+
+          if (data.library) {
+            statusHtml += '<br><a href="' + data.library.previewUrl + '" target="_blank" style="color: #007bff;">View block in library →</a>';
+            statusHtml += ' (<a href="' + data.library.daUrl + '" target="_blank" style="color: #6c757d; font-size: 12px;">edit in DA</a>)';
+          }
+
+          if (data.cleanup) {
+            statusHtml += '<br><span style="font-size: 12px; color: #666;">Cleaned up ' + data.cleanup.branchesDeleted + ' branches, ' + data.cleanup.pagesDeleted + ' pages.</span>';
+          }
+
+          statusEl.innerHTML = statusHtml;
+          statusEl.style.color = '#28a745';
+          btn.textContent = 'Finalized';
+          btn.style.background = '#6c757d';
+          setStatus('Winner finalized! Block merged and added to library.', 'success');
+        } else {
+          throw new Error(data.error);
+        }
+      } catch (err) {
+        statusEl.textContent = 'Error: ' + err.message;
+        statusEl.style.color = '#dc3545';
+        btn.disabled = false;
+        btn.textContent = 'Finalize & Merge Winner';
+        setStatus('Error finalizing: ' + err.message, 'error');
       }
     }
 
@@ -4900,6 +5235,61 @@ function generateBranchNameFromUrl(siteUrl: string): string {
   }
 }
 
+// =============================================================================
+// EDS Preview Flow Helper Functions
+// =============================================================================
+
+/**
+ * Generate a random 6-character session ID
+ */
+function generateSessionId(): string {
+  const chars = 'abcdefghijklmnopqrstuvwxyz0123456789';
+  let result = '';
+  for (let i = 0; i < 6; i++) {
+    result += chars.charAt(Math.floor(Math.random() * chars.length));
+  }
+  return result;
+}
+
+/**
+ * Build variant branch name: {session}-{opt}-{iter}
+ * Short format to stay under 63-char subdomain limit for EDS preview URLs
+ */
+function buildVariantBranchName(
+  sessionId: string,
+  option: number,
+  iteration: number
+): string {
+  return `${sessionId}-${option}-${iteration}`;
+}
+
+/**
+ * Build variant DA path: {basePath}/{session}-{opt}-{iter}
+ */
+function buildVariantDaPath(
+  basePath: string,
+  sessionId: string,
+  option: number,
+  iteration: number
+): string {
+  // Ensure basePath starts with / and doesn't end with /
+  const normalizedBase = basePath.startsWith('/') ? basePath : `/${basePath}`;
+  const cleanBase = normalizedBase.endsWith('/') ? normalizedBase.slice(0, -1) : normalizedBase;
+  return `${cleanBase}/${sessionId}-${option}-${iteration}`;
+}
+
+/**
+ * Build variant preview URL
+ */
+function buildVariantPreviewUrl(
+  owner: string,
+  repo: string,
+  branch: string,
+  daPath: string
+): string {
+  return `https://${branch}--${repo}--${owner}.aem.page${daPath}`;
+}
+
 /**
  * Handles the /block-github endpoint
  * Pushes generated block code (JS, CSS) to a user's GitHub repository in a single commit
@@ -5347,6 +5737,679 @@ async function handleBlockDA(request: Request, env: Env): Promise<Response> {
   } catch (error) {
     return handleError(error, env);
   }
+}
+
+// =============================================================================
+// EDS Preview Flow Handlers
+// =============================================================================
+
+/**
+ * Helper to make GitHub API calls with proper headers and error handling
+ */
+function createGitHubFetcher(token: string) {
+  const headers: Record<string, string> = {
+    'Accept': 'application/vnd.github+json',
+    'Authorization': `Bearer ${token}`,
+    'X-GitHub-Api-Version': '2022-11-28',
+    'User-Agent': 'AEM-Block-Generator-Worker',
+  };
+
+  return async function githubFetch(url: string, options?: RequestInit): Promise<Response> {
+    const response = await fetch(url, {
+      ...options,
+      headers: { ...headers, ...options?.headers },
+    });
+
+    if (response.status === 401 || response.status === 403) {
+      throw new BlockGeneratorError(
+        'GitHub authentication failed. Check your token permissions.',
+        'GITHUB_AUTH_FAILED',
+        401
+      );
+    }
+
+    return response;
+  };
+}
+
+/**
+ * Ensure a branch exists, creating from source if it doesn't
+ * Returns the current commit SHA of the branch
+ */
+async function ensureBranchExists(
+  githubFetch: (url: string, options?: RequestInit) => Promise<Response>,
+  owner: string,
+  repo: string,
+  branch: string,
+  sourceBranch: string = 'main'
+): Promise<string> {
+  const refResponse = await githubFetch(
+    `https://api.github.com/repos/${owner}/${repo}/git/ref/heads/${branch}`
+  );
+
+  if (refResponse.status === 404) {
+    console.log(`Branch ${branch} not found, creating from ${sourceBranch}...`);
+
+    // Get source branch SHA
+    const sourceRefResponse = await githubFetch(
+      `https://api.github.com/repos/${owner}/${repo}/git/ref/heads/${sourceBranch}`
+    );
+
+    if (!sourceRefResponse.ok) {
+      const error = await sourceRefResponse.text();
+      throw new BlockGeneratorError(
+        `Failed to get ${sourceBranch} branch: ${sourceRefResponse.status} - ${error}`,
+        'GITHUB_API_ERROR',
+        sourceRefResponse.status
+      );
+    }
+
+    const sourceRefData = await sourceRefResponse.json() as { object: { sha: string } };
+    const sourceSha = sourceRefData.object.sha;
+
+    // Create new branch
+    const createBranchResponse = await githubFetch(
+      `https://api.github.com/repos/${owner}/${repo}/git/refs`,
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          ref: `refs/heads/${branch}`,
+          sha: sourceSha,
+        }),
+      }
+    );
+
+    if (!createBranchResponse.ok) {
+      const error = await createBranchResponse.text();
+      throw new BlockGeneratorError(
+        `Failed to create branch ${branch}: ${createBranchResponse.status} - ${error}`,
+        'GITHUB_API_ERROR',
+        createBranchResponse.status
+      );
+    }
+
+    console.log(`Created branch ${branch} from ${sourceBranch}`);
+    return sourceSha;
+  }
+
+  if (!refResponse.ok) {
+    const error = await refResponse.text();
+    throw new BlockGeneratorError(
+      `Failed to get branch ref: ${refResponse.status} - ${error}`,
+      'GITHUB_API_ERROR',
+      refResponse.status
+    );
+  }
+
+  const refData = await refResponse.json() as { object: { sha: string } };
+  return refData.object.sha;
+}
+
+/**
+ * Push files to a branch in a single commit
+ */
+async function pushFilesToBranch(
+  githubFetch: (url: string, options?: RequestInit) => Promise<Response>,
+  owner: string,
+  repo: string,
+  branch: string,
+  files: Array<{ path: string; content: string }>,
+  commitMessage: string
+): Promise<{ commitSha: string; commitUrl: string }> {
+  // Get current commit SHA
+  const currentCommitSha = await ensureBranchExists(githubFetch, owner, repo, branch, branch.split('-')[0]);
+
+  // Get base tree SHA
+  const commitResponse = await githubFetch(
+    `https://api.github.com/repos/${owner}/${repo}/git/commits/${currentCommitSha}`
+  );
+
+  if (!commitResponse.ok) {
+    const error = await commitResponse.text();
+    throw new BlockGeneratorError(
+      `Failed to get commit: ${commitResponse.status} - ${error}`,
+      'GITHUB_API_ERROR',
+      commitResponse.status
+    );
+  }
+
+  const commitData = await commitResponse.json() as { tree: { sha: string } };
+  const baseTreeSha = commitData.tree.sha;
+
+  // Create blobs for all files
+  const createBlob = async (content: string): Promise<string> => {
+    const blobResponse = await githubFetch(
+      `https://api.github.com/repos/${owner}/${repo}/git/blobs`,
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ content, encoding: 'utf-8' }),
+      }
+    );
+
+    if (!blobResponse.ok) {
+      const error = await blobResponse.text();
+      throw new BlockGeneratorError(
+        `Failed to create blob: ${blobResponse.status} - ${error}`,
+        'GITHUB_API_ERROR',
+        blobResponse.status
+      );
+    }
+
+    const blobData = await blobResponse.json() as { sha: string };
+    return blobData.sha;
+  };
+
+  const blobShas = await Promise.all(files.map(f => createBlob(f.content)));
+
+  // Create new tree
+  const treeResponse = await githubFetch(
+    `https://api.github.com/repos/${owner}/${repo}/git/trees`,
+    {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        base_tree: baseTreeSha,
+        tree: files.map((f, i) => ({
+          path: f.path,
+          mode: '100644',
+          type: 'blob',
+          sha: blobShas[i],
+        })),
+      }),
+    }
+  );
+
+  if (!treeResponse.ok) {
+    const error = await treeResponse.text();
+    throw new BlockGeneratorError(
+      `Failed to create tree: ${treeResponse.status} - ${error}`,
+      'GITHUB_API_ERROR',
+      treeResponse.status
+    );
+  }
+
+  const treeData = await treeResponse.json() as { sha: string };
+
+  // Create commit
+  const newCommitResponse = await githubFetch(
+    `https://api.github.com/repos/${owner}/${repo}/git/commits`,
+    {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        message: commitMessage,
+        tree: treeData.sha,
+        parents: [currentCommitSha],
+      }),
+    }
+  );
+
+  if (!newCommitResponse.ok) {
+    const error = await newCommitResponse.text();
+    throw new BlockGeneratorError(
+      `Failed to create commit: ${newCommitResponse.status} - ${error}`,
+      'GITHUB_API_ERROR',
+      newCommitResponse.status
+    );
+  }
+
+  const newCommitData = await newCommitResponse.json() as { sha: string };
+
+  // Update branch ref
+  const updateRefResponse = await githubFetch(
+    `https://api.github.com/repos/${owner}/${repo}/git/refs/heads/${branch}`,
+    {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ sha: newCommitData.sha }),
+    }
+  );
+
+  if (!updateRefResponse.ok) {
+    const error = await updateRefResponse.text();
+    throw new BlockGeneratorError(
+      `Failed to update branch ref: ${updateRefResponse.status} - ${error}`,
+      'GITHUB_API_ERROR',
+      updateRefResponse.status
+    );
+  }
+
+  return {
+    commitSha: newCommitData.sha,
+    commitUrl: `https://github.com/${owner}/${repo}/commit/${newCommitData.sha}`,
+  };
+}
+
+/**
+ * Handles /block-variant-push endpoint
+ * Pushes a block variant to GitHub (code) and DA (content)
+ */
+async function handleBlockVariantPush(request: Request, env: Env): Promise<Response> {
+  try {
+    const body = await request.json() as BlockVariantPushRequest;
+
+    // Validate required fields
+    const missing: string[] = [];
+    if (!body.sessionId) missing.push('sessionId');
+    if (!body.blockName) missing.push('blockName');
+    if (body.option === undefined) missing.push('option');
+    if (body.iteration === undefined) missing.push('iteration');
+    if (!body.html) missing.push('html');
+    if (!body.css) missing.push('css');
+    if (!body.js) missing.push('js');
+    if (!body.github?.owner) missing.push('github.owner');
+    if (!body.github?.repo) missing.push('github.repo');
+    if (!body.da?.org) missing.push('da.org');
+    if (!body.da?.site) missing.push('da.site');
+
+    // GitHub token: use request token or fall back to env
+    const githubToken = body.github?.token || env.GITHUB_TOKEN;
+    if (!githubToken) missing.push('github.token (or GITHUB_TOKEN env)');
+
+    if (missing.length > 0) {
+      throw new BlockGeneratorError(
+        `Missing required fields: ${missing.join(', ')}`,
+        'INVALID_REQUEST',
+        400
+      );
+    }
+
+    // Sanitize block name
+    const blockName = body.blockName.toLowerCase().replace(/\s+/g, '-').replace(/[^a-z0-9-]/g, '');
+
+    // Build variant identifiers (short format to stay under 63-char subdomain limit)
+    const daBasePath = body.da.basePath || '/drafts/gen';
+    const variantBranch = buildVariantBranchName(body.sessionId, body.option, body.iteration);
+    const variantDaPath = buildVariantDaPath(daBasePath, body.sessionId, body.option, body.iteration);
+    const previewUrl = buildVariantPreviewUrl(body.github.owner, body.github.repo, variantBranch, variantDaPath);
+
+    console.log(`Pushing variant: branch=${variantBranch}, daPath=${variantDaPath}`);
+
+    // Create GitHub fetcher
+    const githubFetch = createGitHubFetcher(githubToken);
+
+    // Create variant branch from main and push code
+    await ensureBranchExists(githubFetch, body.github.owner, body.github.repo, variantBranch, 'main');
+
+    const jsPath = `blocks/${blockName}/${blockName}.js`;
+    const cssPath = `blocks/${blockName}/${blockName}.css`;
+
+    const { commitSha, commitUrl } = await pushFilesToBranch(
+      githubFetch,
+      body.github.owner,
+      body.github.repo,
+      variantBranch,
+      [
+        { path: jsPath, content: body.js },
+        { path: cssPath, content: body.css },
+      ],
+      `Add ${blockName} block (session ${body.sessionId}, opt ${body.option}, iter ${body.iteration})`
+    );
+
+    console.log(`Pushed code to GitHub: ${commitUrl}`);
+
+    // Step 3: Push HTML to DA
+    const wrappedHtml = wrapBlockInPageStructure(body.html);
+
+    // Get DA token
+    let daToken = body.da.token;
+    if (!daToken && env.DA_CLIENT_ID && env.DA_CLIENT_SECRET && env.DA_SERVICE_TOKEN) {
+      daToken = await exchangeDACredentialsForToken(
+        env.DA_CLIENT_ID,
+        env.DA_CLIENT_SECRET,
+        env.DA_SERVICE_TOKEN
+      );
+    }
+
+    if (!daToken) {
+      throw new BlockGeneratorError(
+        'No DA token provided and service account not configured',
+        'DA_AUTH_FAILED',
+        401
+      );
+    }
+
+    const daPath = `${variantDaPath}.html`;
+    const daUrl = `https://admin.da.live/source/${body.da.org}/${body.da.site}${daPath}`;
+
+    const formData = new FormData();
+    const blob = new Blob([wrappedHtml], { type: 'text/html' });
+    formData.append('data', blob);
+
+    const daResponse = await fetch(daUrl, {
+      method: 'PUT',
+      headers: { 'Authorization': `Bearer ${daToken}` },
+      body: formData,
+    });
+
+    if (!daResponse.ok) {
+      const error = await daResponse.text();
+      throw new BlockGeneratorError(
+        `DA Admin API error: ${daResponse.status} - ${error}`,
+        'DA_API_ERROR',
+        daResponse.status
+      );
+    }
+
+    console.log(`Pushed content to DA: ${variantDaPath}`);
+
+    // Trigger AEM Admin preview API to make content available at preview URL
+    // Uses IMS service account token for authentication
+    const aemPreviewUrl = `https://admin.hlx.page/preview/${body.github.owner}/${body.github.repo}/${variantBranch}${variantDaPath}`;
+    console.log(`Triggering AEM preview: ${aemPreviewUrl}`);
+
+    try {
+      const imsToken = await getDAToken(env);
+      let aemResponse = await fetch(aemPreviewUrl, {
+        method: 'POST',
+        headers: {
+          'Authorization': `Bearer ${imsToken}`,
+        },
+      });
+
+      // Handle token expiration - retry once with fresh token
+      if (aemResponse.status === 401) {
+        console.log('AEM preview 401, clearing cached token and retrying...');
+        clearCachedToken();
+        const freshToken = await getDAToken(env);
+        aemResponse = await fetch(aemPreviewUrl, {
+          method: 'POST',
+          headers: {
+            'Authorization': `Bearer ${freshToken}`,
+          },
+        });
+      }
+
+      if (aemResponse.ok) {
+        console.log(`AEM preview triggered successfully`);
+      } else {
+        const aemError = await aemResponse.text();
+        console.warn(`AEM preview trigger failed (${aemResponse.status}): ${aemError}`);
+        // Don't fail the whole request - preview might still work after a delay
+      }
+    } catch (aemErr) {
+      console.warn('AEM preview trigger error:', aemErr);
+      // Don't fail - preview API is best-effort
+    }
+
+    // Build response
+    const variant: BlockVariant = {
+      option: body.option,
+      iteration: body.iteration,
+      blockName,
+      branch: variantBranch,
+      daPath: variantDaPath,
+      previewUrl,
+      html: body.html,
+      css: body.css,
+      js: body.js,
+    };
+
+    const response: BlockVariantPushResponse = {
+      success: true,
+      variant,
+    };
+
+    return Response.json(response, { status: 201, headers: corsHeaders(env) });
+  } catch (error) {
+    return handleError(error, env);
+  }
+}
+
+/**
+ * Handles /block-finalize endpoint
+ * Merges winning variant to site branch and cleans up
+ */
+async function handleBlockFinalize(request: Request, env: Env): Promise<Response> {
+  try {
+    const body = await request.json() as BlockFinalizeRequest;
+
+    // Validate required fields
+    const missing: string[] = [];
+    if (!body.sessionId) missing.push('sessionId');
+    if (!body.blockName) missing.push('blockName');
+    if (!body.winner?.option) missing.push('winner.option');
+    if (!body.winner?.iteration) missing.push('winner.iteration');
+    if (!body.github?.owner) missing.push('github.owner');
+    if (!body.github?.repo) missing.push('github.repo');
+
+    // GitHub token: use request token or fall back to env
+    const githubToken = body.github?.token || env.GITHUB_TOKEN;
+    if (!githubToken) missing.push('github.token (or GITHUB_TOKEN env)');
+
+    if (missing.length > 0) {
+      throw new BlockGeneratorError(
+        `Missing required fields: ${missing.join(', ')}`,
+        'INVALID_REQUEST',
+        400
+      );
+    }
+
+    const blockName = body.blockName.toLowerCase().replace(/\s+/g, '-').replace(/[^a-z0-9-]/g, '');
+    const githubFetch = createGitHubFetcher(githubToken);
+
+    // Build winner branch name (short format)
+    const winnerBranch = buildVariantBranchName(
+      body.sessionId,
+      body.winner.option,
+      body.winner.iteration
+    );
+
+    console.log(`Finalizing: merging ${winnerBranch} into main`);
+
+    // Create merge into main (using GitHub merge API)
+    const mergeResponse = await githubFetch(
+      `https://api.github.com/repos/${body.github.owner}/${body.github.repo}/merges`,
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          base: 'main',
+          head: winnerBranch,
+          commit_message: `Merge ${blockName} block from generation session ${body.sessionId}`,
+        }),
+      }
+    );
+
+    if (!mergeResponse.ok) {
+      const error = await mergeResponse.text();
+      throw new BlockGeneratorError(
+        `Failed to merge: ${mergeResponse.status} - ${error}`,
+        'GITHUB_API_ERROR',
+        mergeResponse.status
+      );
+    }
+
+    const mergeData = await mergeResponse.json() as { sha: string };
+
+    const commitUrl = `https://github.com/${body.github.owner}/${body.github.repo}/commit/${mergeData.sha}`;
+
+    const result: BlockFinalizeResponse = {
+      success: true,
+      merged: {
+        branch: winnerBranch,
+        into: 'main',
+        commitSha: mergeData.sha,
+        commitUrl,
+      },
+    };
+
+    // Copy winner DA page to library path
+    if (body.da) {
+      try {
+        const imsToken = await getDAToken(env);
+        const winnerDaPath = `/drafts/gen/${body.sessionId}-${body.winner.option}-${body.winner.iteration}`;
+        const libraryPath = `/docs/library/blocks/${blockName}`;
+
+        console.log(`Copying DA page from ${winnerDaPath} to ${libraryPath}`);
+
+        // First, get the source page content
+        const sourceUrl = `https://admin.da.live/source/${body.da.org}/${body.da.site}${winnerDaPath}.html`;
+        const sourceResponse = await fetch(sourceUrl, {
+          method: 'GET',
+          headers: { 'Authorization': `Bearer ${imsToken}` },
+        });
+
+        if (sourceResponse.ok) {
+          const sourceHtml = await sourceResponse.text();
+
+          // Create the library page with the same content
+          const destUrl = `https://admin.da.live/source/${body.da.org}/${body.da.site}${libraryPath}.html`;
+          const formData = new FormData();
+          formData.append('data', new Blob([sourceHtml], { type: 'text/html' }));
+
+          const destResponse = await fetch(destUrl, {
+            method: 'PUT',
+            headers: { 'Authorization': `Bearer ${imsToken}` },
+            body: formData,
+          });
+
+          if (destResponse.ok) {
+            // Trigger preview for the library page
+            const previewUrl = `https://admin.hlx.page/preview/${body.da.org}/${body.da.site}/main${libraryPath}`;
+            await fetch(previewUrl, {
+              method: 'POST',
+              headers: { 'Authorization': `Bearer ${imsToken}` },
+            });
+
+            result.library = {
+              daPath: libraryPath,
+              daUrl: `https://da.live/edit#/${body.da.org}/${body.da.site}${libraryPath}`,
+              previewUrl: `https://main--${body.da.site}--${body.da.org}.aem.page${libraryPath}`,
+            };
+            console.log(`Copied DA page to library: ${libraryPath}`);
+          } else {
+            console.warn(`Failed to copy DA page to library: ${destResponse.status}`);
+          }
+        } else {
+          console.warn(`Failed to read source DA page: ${sourceResponse.status}`);
+        }
+      } catch (daErr) {
+        console.warn('Error copying DA page to library:', daErr);
+        // Don't fail the whole request - library copy is optional
+      }
+    }
+
+    // Cleanup if requested
+    if (body.cleanup !== false) {
+      const cleanupResult = await cleanupGenerationSession(
+        githubFetch,
+        body.github.owner,
+        body.github.repo,
+        body.sessionId,
+        env,
+        body.da
+      );
+      result.cleanup = cleanupResult;
+    }
+
+    return Response.json(result, { status: 200, headers: corsHeaders(env) });
+  } catch (error) {
+    return handleError(error, env);
+  }
+}
+
+/**
+ * Handles /block-cleanup endpoint
+ * Cleans up a generation session without finalizing
+ */
+async function handleBlockCleanup(request: Request, env: Env): Promise<Response> {
+  try {
+    const body = await request.json() as BlockCleanupRequest;
+
+    // Validate required fields
+    const missing: string[] = [];
+    if (!body.sessionId) missing.push('sessionId');
+    if (!body.blockName) missing.push('blockName');
+    if (!body.github?.owner) missing.push('github.owner');
+    if (!body.github?.repo) missing.push('github.repo');
+
+    // GitHub token: use request token or fall back to env
+    const githubToken = body.github?.token || env.GITHUB_TOKEN;
+    if (!githubToken) missing.push('github.token (or GITHUB_TOKEN env)');
+
+    if (missing.length > 0) {
+      throw new BlockGeneratorError(
+        `Missing required fields: ${missing.join(', ')}`,
+        'INVALID_REQUEST',
+        400
+      );
+    }
+
+    const githubFetch = createGitHubFetcher(githubToken);
+
+    const cleanupResult = await cleanupGenerationSession(
+      githubFetch,
+      body.github.owner,
+      body.github.repo,
+      body.sessionId,
+      env,
+      body.da
+    );
+
+    const response: BlockCleanupResponse = {
+      success: true,
+      branchesDeleted: [],
+      pagesDeleted: [],
+    };
+
+    return Response.json(response, { status: 200, headers: corsHeaders(env) });
+  } catch (error) {
+    return handleError(error, env);
+  }
+}
+
+/**
+ * Helper to cleanup all branches and DA pages for a generation session
+ */
+async function cleanupGenerationSession(
+  githubFetch: (url: string, options?: RequestInit) => Promise<Response>,
+  owner: string,
+  repo: string,
+  sessionId: string,
+  env: Env,
+  daConfig?: DAConfig
+): Promise<{ branchesDeleted: number; pagesDeleted: number }> {
+  let branchesDeleted = 0;
+  let pagesDeleted = 0;
+
+  // List all branches and find ones matching our pattern: {session}-{opt}-{iter}
+  const branchPrefix = `${sessionId}-`;
+
+  try {
+    const branchesResponse = await githubFetch(
+      `https://api.github.com/repos/${owner}/${repo}/branches?per_page=100`
+    );
+
+    if (branchesResponse.ok) {
+      const branches = await branchesResponse.json() as Array<{ name: string }>;
+      const toDelete = branches.filter(b => b.name.startsWith(branchPrefix));
+
+      for (const branch of toDelete) {
+        try {
+          const deleteResponse = await githubFetch(
+            `https://api.github.com/repos/${owner}/${repo}/git/refs/heads/${branch.name}`,
+            { method: 'DELETE' }
+          );
+          if (deleteResponse.ok || deleteResponse.status === 204) {
+            branchesDeleted++;
+            console.log(`Deleted branch: ${branch.name}`);
+          }
+        } catch (e) {
+          console.warn(`Failed to delete branch ${branch.name}:`, e);
+        }
+      }
+    }
+  } catch (e) {
+    console.warn('Failed to list/delete branches:', e);
+  }
+
+  // TODO: Delete DA pages (requires listing DA content or tracking created pages)
+  // For now, DA cleanup is not implemented
+
+  return { branchesDeleted, pagesDeleted };
 }
 
 /**

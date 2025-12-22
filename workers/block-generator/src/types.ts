@@ -155,6 +155,8 @@ export interface Env {
   DA_CLIENT_ID?: string;
   DA_CLIENT_SECRET?: string;
   DA_SERVICE_TOKEN?: string;
+  // GitHub Token for EDS preview flow
+  GITHUB_TOKEN?: string;
 }
 
 // GitHub Push Request/Response
@@ -193,4 +195,107 @@ export interface DACreatePageResponse {
   pageUrl: string;
   previewUrl: string;
   path: string;
+}
+
+// =============================================================================
+// EDS Preview Flow Types
+// =============================================================================
+
+/** GitHub configuration for block generation */
+export interface GitHubConfig {
+  owner: string;
+  repo: string;
+  token?: string; // Optional - uses GITHUB_TOKEN from env if not provided
+}
+
+/** DA configuration for block generation */
+export interface DAConfig {
+  org: string;
+  site: string;
+  /** Base path for generated variants (e.g., "/drafts/gen") */
+  basePath?: string;
+  token?: string; // Optional - uses service account if not provided
+}
+
+/** Generated block variant info */
+export interface BlockVariant {
+  option: number;
+  iteration: number;
+  blockName: string;
+  branch: string;
+  daPath: string;
+  previewUrl: string;
+  html: string;
+  css: string;
+  js: string;
+}
+
+/** Request to push a block variant to GitHub and DA */
+export interface BlockVariantPushRequest {
+  sessionId: string;
+  blockName: string;
+  option: number;
+  iteration: number;
+  html: string;
+  css: string;
+  js: string;
+  github: GitHubConfig;
+  da: DAConfig;
+}
+
+/** Response from pushing a block variant */
+export interface BlockVariantPushResponse {
+  success: true;
+  variant: BlockVariant;
+}
+
+/** Request to finalize and merge winning variant */
+export interface BlockFinalizeRequest {
+  sessionId: string;
+  blockName: string;
+  winner: {
+    option: number;
+    iteration: number;
+  };
+  github: GitHubConfig;
+  da?: DAConfig;
+  /** Path to move winning DA page to (optional) */
+  finalDaPath?: string;
+  /** Whether to cleanup all temporary branches and pages */
+  cleanup?: boolean;
+}
+
+/** Response from finalizing a block */
+export interface BlockFinalizeResponse {
+  success: true;
+  merged: {
+    branch: string;
+    into: string;
+    commitSha: string;
+    commitUrl: string;
+  };
+  library?: {
+    daPath: string;
+    daUrl: string;
+    previewUrl: string;
+  };
+  cleanup?: {
+    branchesDeleted: number;
+    pagesDeleted: number;
+  };
+}
+
+/** Request to cleanup a generation session */
+export interface BlockCleanupRequest {
+  sessionId: string;
+  blockName: string;
+  github: GitHubConfig;
+  da?: DAConfig;
+}
+
+/** Response from cleanup */
+export interface BlockCleanupResponse {
+  success: true;
+  branchesDeleted: string[];
+  pagesDeleted: string[];
 }
