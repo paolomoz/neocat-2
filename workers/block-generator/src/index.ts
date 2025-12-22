@@ -267,6 +267,24 @@ export default {
       return handleBlockRefine(request, env);
     }
 
+    // Block winner endpoint (select best option using Claude Vision)
+    if (url.pathname === '/block-winner' && request.method === 'POST') {
+      return handleBlockWinner(request, env);
+    }
+
+    // Debug endpoint to check config
+    if (url.pathname === '/debug-config' && request.method === 'GET') {
+      return Response.json({
+        ANTHROPIC_USE_BEDROCK: env.ANTHROPIC_USE_BEDROCK,
+        ANTHROPIC_USE_BEDROCK_type: typeof env.ANTHROPIC_USE_BEDROCK,
+        ANTHROPIC_AWS_BEARER_TOKEN_BEDROCK_exists: !!env.ANTHROPIC_AWS_BEARER_TOKEN_BEDROCK,
+        ANTHROPIC_AWS_BEARER_TOKEN_BEDROCK_length: env.ANTHROPIC_AWS_BEARER_TOKEN_BEDROCK?.length || 0,
+        ANTHROPIC_AWS_REGION: env.ANTHROPIC_AWS_REGION,
+        ANTHROPIC_API_KEY_exists: !!env.ANTHROPIC_API_KEY,
+        configResult: getAnthropicConfig(env) ? 'configured' : 'undefined',
+      });
+    }
+
     // Test UI for block-generate and block-refine
     if (url.pathname === '/test' && request.method === 'GET') {
       return handleBlockTestUI(env);
@@ -284,23 +302,32 @@ export default {
  * Build Anthropic config from environment
  */
 function getAnthropicConfig(env: Env): AnthropicConfig | undefined {
+  // Debug logging
+  console.log('getAnthropicConfig called');
+  console.log('  ANTHROPIC_USE_BEDROCK:', env.ANTHROPIC_USE_BEDROCK, 'type:', typeof env.ANTHROPIC_USE_BEDROCK);
+  console.log('  ANTHROPIC_AWS_BEARER_TOKEN_BEDROCK exists:', !!env.ANTHROPIC_AWS_BEARER_TOKEN_BEDROCK);
+  console.log('  ANTHROPIC_API_KEY exists:', !!env.ANTHROPIC_API_KEY);
+
   // Check for Bedrock config
   if (env.ANTHROPIC_USE_BEDROCK === '1' && env.ANTHROPIC_AWS_BEARER_TOKEN_BEDROCK) {
+    console.log('  Using Bedrock config with model:', env.ANTHROPIC_MODEL_OPUS || 'default');
     return {
       useBedrock: true,
       bedrockToken: env.ANTHROPIC_AWS_BEARER_TOKEN_BEDROCK,
       bedrockRegion: env.ANTHROPIC_AWS_REGION || 'us-east-1',
-      bedrockModel: env.ANTHROPIC_MODEL,
+      bedrockModel: env.ANTHROPIC_MODEL_OPUS,
     };
   }
 
   // Check for direct Anthropic API key
   if (env.ANTHROPIC_API_KEY) {
+    console.log('  Using direct API key');
     return {
       apiKey: env.ANTHROPIC_API_KEY,
     };
   }
 
+  console.log('  No Anthropic config found!');
   return undefined;
 }
 
@@ -1914,6 +1941,249 @@ async function handleBlockRefine(request: Request, env: Env): Promise<Response> 
 }
 
 /**
+ * Handle block-winner endpoint: select the best block from multiple options using Claude Vision
+ * Receives original screenshot + array of blocks (latest iteration per option)
+ * Returns the winning block with reasoning
+ */
+async function handleBlockWinner(request: Request, env: Env): Promise<Response> {
+  try {
+    const formData = await request.formData();
+
+    const screenshotFile = formData.get('screenshot') as File;
+    const blocksJson = formData.get('blocks') as string;
+
+    if (!screenshotFile || !blocksJson) {
+      return Response.json(
+        { success: false, error: 'Missing required fields: screenshot and blocks', code: 'INVALID_REQUEST' },
+        { status: 400, headers: corsHeaders(env) }
+      );
+    }
+
+    // Parse blocks array
+    let blocks: Array<{ html: string; css: string; js: string; blockName?: string; optionIndex: number }>;
+    try {
+      blocks = JSON.parse(blocksJson);
+    } catch {
+      return Response.json(
+        { success: false, error: 'Invalid blocks JSON', code: 'INVALID_REQUEST' },
+        { status: 400, headers: corsHeaders(env) }
+      );
+    }
+
+    if (!Array.isArray(blocks) || blocks.length === 0) {
+      return Response.json(
+        { success: false, error: 'Blocks must be a non-empty array', code: 'INVALID_REQUEST' },
+        { status: 400, headers: corsHeaders(env) }
+      );
+    }
+
+    // Get Anthropic config
+    const anthropicConfig = getAnthropicConfig(env);
+    if (!anthropicConfig) {
+      return Response.json(
+        { success: false, error: 'Anthropic API not configured', code: 'INTERNAL_ERROR' },
+        { status: 500, headers: corsHeaders(env) }
+      );
+    }
+
+    if (!env.BROWSER) {
+      return Response.json(
+        { success: false, error: 'Browser Rendering not configured', code: 'INTERNAL_ERROR' },
+        { status: 500, headers: corsHeaders(env) }
+      );
+    }
+
+    // Convert screenshot to base64
+    const arrayBuffer = await screenshotFile.arrayBuffer();
+    const originalScreenshotBase64 = arrayBufferToBase64(arrayBuffer);
+
+    // Launch browser
+    const browser = await launchBrowserWithRetry(env.BROWSER);
+
+    try {
+      // Render each block and capture screenshots
+      console.log(`Rendering ${blocks.length} blocks for comparison...`);
+      const renderedScreenshots: string[] = [];
+
+      for (let i = 0; i < blocks.length; i++) {
+        const block = blocks[i];
+        console.log(`  Rendering block ${i + 1}/${blocks.length}...`);
+        const screenshot = await renderBlockToScreenshot(
+          browser,
+          { html: block.html, css: block.css, js: block.js, blockName: block.blockName },
+          { width: 1440, height: 900 }
+        );
+        renderedScreenshots.push(screenshot);
+      }
+
+      // Compress images if needed for Claude API
+      const compressedOriginal = await compressImageIfNeeded(browser, originalScreenshotBase64);
+
+      const compressedRendered: Array<{ data: string; mediaType: 'image/png' | 'image/jpeg' }> = [];
+      for (const screenshot of renderedScreenshots) {
+        const compressed = await compressImageIfNeeded(browser, screenshot);
+        compressedRendered.push(compressed);
+      }
+
+      // Build the vision prompt
+      const content: Array<{ type: string; source?: any; text?: string }> = [];
+
+      // Add original image
+      content.push({
+        type: 'text',
+        text: 'Image 1: ORIGINAL DESIGN (target) - this is what we want to match'
+      });
+      content.push({
+        type: 'image',
+        source: {
+          type: 'base64',
+          media_type: compressedOriginal.mediaType,
+          data: compressedOriginal.data
+        }
+      });
+
+      // Add rendered blocks
+      for (let i = 0; i < compressedRendered.length; i++) {
+        content.push({
+          type: 'text',
+          text: `Image ${i + 2}: OPTION ${blocks[i].optionIndex + 1} - Generated block`
+        });
+        content.push({
+          type: 'image',
+          source: {
+            type: 'base64',
+            media_type: compressedRendered[i].mediaType,
+            data: compressedRendered[i].data
+          }
+        });
+      }
+
+      // Add the prompt
+      content.push({
+        type: 'text',
+        text: `You are an expert at visual comparison. I'm showing you an ORIGINAL design and ${blocks.length} generated OPTIONS.
+
+Compare each option to the original design and determine which one is the BEST MATCH.
+
+Evaluate based on:
+1. Layout accuracy (positioning, alignment, spacing)
+2. Visual fidelity (colors, typography, contrast)
+3. Content completeness (are all elements present?)
+4. Proportions and sizing
+5. Overall visual impression
+
+Return ONLY a JSON object:
+{
+  "winner": <option number 1-${blocks.length}>,
+  "confidence": <0-100>,
+  "reasoning": "<brief explanation of why this option is best>",
+  "scores": [
+    { "option": 1, "score": <0-100>, "notes": "<brief notes>" },
+    { "option": 2, "score": <0-100>, "notes": "<brief notes>" },
+    ...
+  ]
+}`
+      });
+
+      // Call Claude API
+      let response: Response;
+
+      if (anthropicConfig.useBedrock && anthropicConfig.bedrockToken) {
+        const region = anthropicConfig.bedrockRegion || 'us-east-1';
+        const model = anthropicConfig.bedrockModel || 'anthropic.claude-sonnet-4-20250514-v1:0';
+        const bedrockUrl = `https://bedrock-runtime.${region}.amazonaws.com/model/${encodeURIComponent(model)}/invoke`;
+
+        response = await fetch(bedrockUrl, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'Authorization': `Bearer ${anthropicConfig.bedrockToken}`,
+          },
+          body: JSON.stringify({
+            anthropic_version: 'bedrock-2023-05-31',
+            max_tokens: 4096,
+            messages: [{ role: 'user', content }],
+          }),
+        });
+      } else if (anthropicConfig.apiKey) {
+        response = await fetch('https://api.anthropic.com/v1/messages', {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'x-api-key': anthropicConfig.apiKey,
+            'anthropic-version': '2023-06-01',
+          },
+          body: JSON.stringify({
+            model: 'claude-sonnet-4-20250514',
+            max_tokens: 4096,
+            messages: [{ role: 'user', content }],
+          }),
+        });
+      } else {
+        return Response.json(
+          { success: false, error: 'No Anthropic API configuration', code: 'INTERNAL_ERROR' },
+          { status: 500, headers: corsHeaders(env) }
+        );
+      }
+
+      if (!response.ok) {
+        const error = await response.text();
+        throw new Error(`Claude API error: ${response.status} - ${error}`);
+      }
+
+      const result = await response.json() as {
+        content: Array<{ type: string; text?: string }>;
+      };
+
+      const textContent = result.content.find(c => c.type === 'text');
+      if (!textContent?.text) {
+        throw new Error('No text response from Claude');
+      }
+
+      // Parse the JSON response
+      const jsonMatch = textContent.text.match(/\{[\s\S]*\}/);
+      if (!jsonMatch) {
+        throw new Error('Failed to parse winner selection from Claude');
+      }
+
+      const winnerResult = JSON.parse(jsonMatch[0]) as {
+        winner: number;
+        confidence: number;
+        reasoning: string;
+        scores: Array<{ option: number; score: number; notes: string }>;
+      };
+
+      // Get the winning block
+      const winnerIndex = winnerResult.winner - 1;
+      const winningBlock = blocks[winnerIndex];
+
+      return Response.json({
+        success: true,
+        winner: {
+          optionIndex: winningBlock.optionIndex,
+          blockName: winningBlock.blockName,
+          html: winningBlock.html,
+          css: winningBlock.css,
+          js: winningBlock.js
+        },
+        confidence: winnerResult.confidence,
+        reasoning: winnerResult.reasoning,
+        scores: winnerResult.scores,
+        screenshots: renderedScreenshots.map((s, i) => ({
+          optionIndex: blocks[i].optionIndex,
+          screenshot: s
+        }))
+      }, { status: 200, headers: corsHeaders(env) });
+
+    } finally {
+      await browser.close();
+    }
+  } catch (error) {
+    return handleError(error, env);
+  }
+}
+
+/**
  * Returns the test UI HTML page for block-generate and block-refine
  */
 function handleBlockTestUI(env: Env): Response {
@@ -2004,6 +2274,61 @@ function handleBlockTestUI(env: Env): Response {
     }
     button.refine:hover {
       background: #008855;
+    }
+    button.winner {
+      background: #9933cc;
+    }
+    button.winner:hover {
+      background: #7722aa;
+    }
+    .winner-result {
+      margin-top: 15px;
+      padding: 15px;
+      border-radius: 8px;
+      background: linear-gradient(135deg, #f5f0ff 0%, #e8e0ff 100%);
+      border: 2px solid #9933cc;
+    }
+    .winner-result h3 {
+      margin: 0 0 10px 0;
+      color: #6622aa;
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+    .winner-result .reasoning {
+      font-size: 14px;
+      color: #333;
+      margin-bottom: 10px;
+    }
+    .winner-result .scores {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+      gap: 10px;
+      margin-top: 10px;
+    }
+    .winner-result .score-card {
+      background: white;
+      padding: 10px;
+      border-radius: 6px;
+      border: 1px solid #ddd;
+    }
+    .winner-result .score-card.winner {
+      border-color: #9933cc;
+      background: #f5f0ff;
+    }
+    .winner-result .score-card .option-name {
+      font-weight: bold;
+      margin-bottom: 5px;
+    }
+    .winner-result .score-card .score {
+      font-size: 24px;
+      font-weight: bold;
+      color: #9933cc;
+    }
+    .winner-result .score-card .notes {
+      font-size: 12px;
+      color: #666;
+      margin-top: 5px;
     }
     .button-group {
       display: flex;
@@ -2183,6 +2508,48 @@ function handleBlockTestUI(env: Env): Response {
     .option-tab.success {
       border-color: #28a745;
     }
+    .iteration-tabs {
+      display: flex;
+      gap: 6px;
+      margin-bottom: 15px;
+      padding: 8px 12px;
+      background: #f0f4f8;
+      border-radius: 6px;
+    }
+    .iteration-tab {
+      padding: 5px 12px;
+      border: 1px solid #ccc;
+      border-radius: 4px;
+      cursor: pointer;
+      background: white;
+      font-size: 12px;
+      color: #666;
+      transition: all 0.2s;
+    }
+    .iteration-tab:hover {
+      border-color: #0066cc;
+      color: #0066cc;
+    }
+    .iteration-tab.active {
+      border-color: #0066cc;
+      background: #e6f0ff;
+      color: #0066cc;
+      font-weight: 500;
+    }
+    .iteration-tab.loading {
+      border-color: #ffc107;
+      background: #fff3cd;
+      color: #856404;
+    }
+    .iteration-tab.success {
+      border-color: #28a745;
+    }
+    .iteration-label {
+      font-size: 12px;
+      color: #666;
+      margin-right: 8px;
+      align-self: center;
+    }
   </style>
 </head>
 <body>
@@ -2215,9 +2582,16 @@ function handleBlockTestUI(env: Env): Response {
         <div class="button-group">
           <button id="generateBtn" onclick="generate()">Generate Block</button>
           <button id="refineBtn" class="refine" onclick="refine()" disabled>Refine</button>
+          <button id="winnerBtn" class="winner" onclick="pickWinner()" disabled>Pick Winner</button>
           <span class="iteration-count" id="iterationCount"></span>
         </div>
         <div id="status" class="status" style="display: none;"></div>
+
+        <div id="winnerResult" class="winner-result" style="display: none;">
+          <h3>🏆 <span id="winnerTitle">Winner</span></h3>
+          <div class="reasoning" id="winnerReasoning"></div>
+          <div class="scores" id="winnerScores"></div>
+        </div>
 
         <div id="screenshotPreview" style="margin-top: 15px; display: none;">
           <label>Screenshot Preview:</label>
@@ -2231,6 +2605,10 @@ function handleBlockTestUI(env: Env): Response {
           <div class="option-tab active" onclick="switchOption(0)" id="optionTab0">Option 1</div>
           <div class="option-tab" onclick="switchOption(1)" id="optionTab1">Option 2</div>
           <div class="option-tab" onclick="switchOption(2)" id="optionTab2">Option 3</div>
+        </div>
+        <div class="iteration-tabs" id="iterationTabs" style="display: none;">
+          <span class="iteration-label">Iterations:</span>
+          <div id="iterationTabsContainer" style="display: flex; gap: 6px;"></div>
         </div>
         <div class="tabs">
           <div class="tab active" onclick="switchTab('html')">HTML</div>
@@ -2279,11 +2657,13 @@ function handleBlockTestUI(env: Env): Response {
   </div>
 
   <script>
-    let blocks = [null, null, null];  // Store 3 options
-    let iterations = [0, 0, 0];       // Track iterations per option
+    // blocks[option][iteration] = block data
+    let blocks = [[], [], []];        // Store iterations per option
     let activeOption = 0;             // Currently selected option
+    let activeIteration = 0;          // Currently selected iteration within option
     let originalScreenshot = null;
     let currentViewport = 1440;
+    let isGenerating = false;         // Prevent multiple generate calls
 
     // Set viewport size for preview
     function setViewport(width) {
@@ -2330,24 +2710,65 @@ function handleBlockTestUI(env: Env): Response {
 
     function switchOption(index) {
       activeOption = index;
+      // Reset to latest iteration for this option
+      activeIteration = Math.max(0, blocks[index].length - 1);
       document.querySelectorAll('.option-tab').forEach((t, i) => {
         t.classList.remove('active');
         if (i === index) t.classList.add('active');
       });
-      displayCurrentOption();
+      updateIterationTabs();
+      displayCurrentBlock();
       updatePreview();
     }
 
-    function displayCurrentOption() {
-      const block = blocks[activeOption];
-      if (block) {
+    function switchIteration(index) {
+      activeIteration = index;
+      document.querySelectorAll('.iteration-tab').forEach((t, i) => {
+        t.classList.remove('active');
+        if (i === index) t.classList.add('active');
+      });
+      displayCurrentBlock();
+      updatePreview();
+    }
+
+    function updateIterationTabs() {
+      const container = document.getElementById('iterationTabsContainer');
+      const iterations = blocks[activeOption];
+
+      if (iterations.length === 0) {
+        document.getElementById('iterationTabs').style.display = 'none';
+        return;
+      }
+
+      document.getElementById('iterationTabs').style.display = 'flex';
+
+      let html = '';
+      for (let i = 0; i < iterations.length; i++) {
+        const isActive = i === activeIteration;
+        const block = iterations[i];
+        const statusClass = block ? (block.loading ? 'loading' : 'success') : '';
+        html += '<div class="iteration-tab ' + (isActive ? 'active ' : '') + statusClass + '" onclick="switchIteration(' + i + ')">v' + (i + 1) + '</div>';
+      }
+      container.innerHTML = html;
+    }
+
+    function displayCurrentBlock() {
+      const iterations = blocks[activeOption];
+      const block = iterations[activeIteration];
+
+      if (block && !block.loading) {
         document.getElementById('generatedHtml').textContent = block.html;
         document.getElementById('generatedCss').textContent = block.css;
         document.getElementById('generatedJs').textContent = block.js;
-        document.getElementById('iterationCount').textContent = 'Iteration: ' + iterations[activeOption];
-        document.getElementById('refineBtn').disabled = false;
+        document.getElementById('iterationCount').textContent = 'Option ' + (activeOption + 1) + ' / v' + (activeIteration + 1);
+        document.getElementById('refineBtn').disabled = isGenerating;
+      } else if (block && block.loading) {
+        document.getElementById('generatedHtml').textContent = 'Generating...';
+        document.getElementById('generatedCss').textContent = '';
+        document.getElementById('generatedJs').textContent = '';
+        document.getElementById('refineBtn').disabled = true;
       } else {
-        document.getElementById('generatedHtml').textContent = 'Generation in progress...';
+        document.getElementById('generatedHtml').textContent = 'No block generated yet';
         document.getElementById('generatedCss').textContent = '';
         document.getElementById('generatedJs').textContent = '';
         document.getElementById('refineBtn').disabled = true;
@@ -2355,8 +2776,8 @@ function handleBlockTestUI(env: Env): Response {
     }
 
     function updatePreview() {
-      const currentBlock = blocks[activeOption];
-      if (!currentBlock) return;
+      const currentBlock = blocks[activeOption][activeIteration];
+      if (!currentBlock || currentBlock.loading) return;
 
       // Transform the JS to extract the decorate function and call it
       // EDS blocks use: export default function decorate(block) { ... }
@@ -2411,97 +2832,171 @@ function handleBlockTestUI(env: Env): Response {
         return;
       }
 
+      if (isGenerating) return;
+      isGenerating = true;
+
       // Reset state
-      blocks = [null, null, null];
-      iterations = [0, 0, 0];
+      blocks = [[], [], []];
       activeOption = 0;
+      activeIteration = 0;
 
       // Show option tabs and set all to loading state
       document.getElementById('optionTabs').style.display = 'flex';
+      document.getElementById('iterationTabs').style.display = 'none';
       for (let i = 0; i < 3; i++) {
         const tab = document.getElementById('optionTab' + i);
         tab.className = 'option-tab loading' + (i === 0 ? ' active' : '');
       }
 
-      setStatus('Generating 3 options in parallel...', 'loading');
+      setStatus('Generating 3 options × 3 iterations (9 total)...', 'loading');
       document.getElementById('generateBtn').disabled = true;
       document.getElementById('refineBtn').disabled = true;
+      document.getElementById('winnerBtn').disabled = true;
+      document.getElementById('winnerResult').style.display = 'none';
 
-      // Create 3 parallel requests
-      const requests = [0, 1, 2].map(async (index) => {
+      // Helper to generate initial block
+      async function generateInitial(optionIndex) {
+        const formData = new FormData();
+        formData.append('url', url);
+        formData.append('screenshot', screenshot);
+        if (html) formData.append('html', html);
+        if (xpath) formData.append('xpath', xpath);
+
+        const response = await fetch('/block-generate', { method: 'POST', body: formData });
+        const responseText = await response.text();
+        const result = JSON.parse(responseText);
+
+        if (!result.success) throw new Error(result.error);
+
+        return {
+          html: result.html,
+          css: result.css,
+          js: result.js,
+          blockName: result.blockName
+        };
+      }
+
+      // Helper to refine a block
+      async function refineBlock(optionIndex, iterationIndex) {
+        const prevBlock = blocks[optionIndex][iterationIndex - 1];
+        if (!prevBlock || prevBlock.loading) return null;
+
+        const formData = new FormData();
+        formData.append('url', url);
+        formData.append('screenshot', originalScreenshot);
+        if (html) formData.append('html', html);
+        if (xpath) formData.append('xpath', xpath);
+        formData.append('blockHtml', prevBlock.html);
+        formData.append('blockCss', prevBlock.css);
+        formData.append('blockJs', prevBlock.js);
+        formData.append('blockName', prevBlock.blockName || 'block');
+
+        const response = await fetch('/block-refine', { method: 'POST', body: formData });
+        const responseText = await response.text();
+        const result = JSON.parse(responseText);
+
+        if (!result.success) throw new Error(result.error);
+
+        return {
+          html: result.html,
+          css: result.css,
+          js: result.js,
+          blockName: result.blockName
+        };
+      }
+
+      // Update UI for a specific option/iteration
+      function updateUI(optionIndex, iterationIndex, block, isLoading = false, isError = false) {
+        blocks[optionIndex][iterationIndex] = isLoading ? { loading: true } : block;
+
+        // Update option tab status
+        const optionTab = document.getElementById('optionTab' + optionIndex);
+        const hasSuccess = blocks[optionIndex].some(b => b && !b.loading);
+        const allDone = blocks[optionIndex].length === 3 && blocks[optionIndex].every(b => b && !b.loading);
+
+        if (isError && !hasSuccess) {
+          optionTab.className = 'option-tab error' + (optionIndex === activeOption ? ' active' : '');
+        } else if (hasSuccess) {
+          optionTab.className = 'option-tab success' + (optionIndex === activeOption ? ' active' : '');
+        }
+
+        // If viewing this option, update iteration tabs and display
+        if (optionIndex === activeOption) {
+          updateIterationTabs();
+          if (iterationIndex === activeIteration || (block && activeIteration >= blocks[optionIndex].length)) {
+            activeIteration = Math.min(activeIteration, blocks[optionIndex].length - 1);
+            displayCurrentBlock();
+            updatePreview();
+          }
+        }
+      }
+
+      // Process each option: initial + 2 refinements
+      const optionPromises = [0, 1, 2].map(async (optionIndex) => {
         try {
-          const formData = new FormData();
-          formData.append('url', url);
-          formData.append('screenshot', screenshot);
-          if (html) formData.append('html', html);
-          if (xpath) formData.append('xpath', xpath);
+          // Add loading placeholder for iteration 0
+          updateUI(optionIndex, 0, null, true);
 
-          const response = await fetch('/block-generate', {
-            method: 'POST',
-            body: formData
-          });
+          // Generate initial
+          const initialBlock = await generateInitial(optionIndex);
+          updateUI(optionIndex, 0, initialBlock);
 
-          const responseText = await response.text();
-          let result;
-          try {
-            result = JSON.parse(responseText);
-          } catch (parseError) {
-            throw new Error('Non-JSON response: ' + responseText.substring(0, 100));
-          }
-
-          if (result.success) {
-            blocks[index] = {
-              html: result.html,
-              css: result.css,
-              js: result.js,
-              blockName: result.blockName
-            };
-            iterations[index] = 1;
-
-            // Update tab to success state
-            document.getElementById('optionTab' + index).className = 'option-tab success' + (index === activeOption ? ' active' : '');
-
-            // If this is the active option, display it
-            if (index === activeOption) {
-              displayCurrentOption();
-              updatePreview();
+          // Start 2 refinements sequentially (each depends on previous)
+          for (let refineIter = 1; refineIter <= 2; refineIter++) {
+            updateUI(optionIndex, refineIter, null, true);
+            try {
+              const refinedBlock = await refineBlock(optionIndex, refineIter);
+              updateUI(optionIndex, refineIter, refinedBlock);
+            } catch (refineError) {
+              console.error('Refine error for option ' + optionIndex + ' iter ' + refineIter + ':', refineError);
+              // Remove the loading placeholder on error
+              blocks[optionIndex].pop();
+              updateIterationTabs();
+              break; // Stop further refinements for this option
             }
-
-            return { success: true, index };
-          } else {
-            throw new Error(result.error);
           }
+
+          return { success: true, optionIndex };
         } catch (error) {
-          // Update tab to error state
-          document.getElementById('optionTab' + index).className = 'option-tab error' + (index === activeOption ? ' active' : '');
-          return { success: false, index, error: error.message };
+          console.error('Generation error for option ' + optionIndex + ':', error);
+          updateUI(optionIndex, 0, null, false, true);
+          return { success: false, optionIndex, error: error.message };
         }
       });
 
-      // Wait for all requests to complete
-      const results = await Promise.all(requests);
+      // Wait for all to complete
+      const results = await Promise.all(optionPromises);
       const successCount = results.filter(r => r.success).length;
 
+      isGenerating = false;
       document.getElementById('generateBtn').disabled = false;
+
+      // Count total successful iterations
+      const totalIterations = blocks.reduce((sum, opt) => sum + opt.filter(b => b && !b.loading).length, 0);
 
       if (successCount === 0) {
         setStatus('All generations failed: ' + results[0].error, 'error');
-      } else if (successCount < 3) {
-        setStatus(successCount + ' of 3 options generated successfully', 'success');
       } else {
-        setStatus('All 3 options generated successfully!', 'success');
+        setStatus(totalIterations + ' blocks generated across ' + successCount + ' options!', 'success');
       }
 
       // Enable refine if current option has a block
-      if (blocks[activeOption]) {
+      const currentBlock = blocks[activeOption][activeIteration];
+      if (currentBlock && !currentBlock.loading) {
         document.getElementById('refineBtn').disabled = false;
+      }
+
+      // Enable winner button if at least 2 options have blocks
+      const optionsWithBlocks = blocks.filter(opt => opt.some(b => b && !b.loading)).length;
+      if (optionsWithBlocks >= 2) {
+        document.getElementById('winnerBtn').disabled = false;
       }
     }
 
     async function refine() {
-      const currentBlock = blocks[activeOption];
-      if (!currentBlock || !originalScreenshot) {
-        setStatus('Please generate a block first', 'error');
+      const currentBlock = blocks[activeOption][activeIteration];
+      if (!currentBlock || currentBlock.loading || !originalScreenshot) {
+        setStatus('Please select a valid block first', 'error');
         return;
       }
 
@@ -2510,8 +3005,15 @@ function handleBlockTestUI(env: Env): Response {
       const xpath = document.getElementById('xpath').value;
       const refinePrompt = document.getElementById('refinePrompt').value;
 
-      setStatus('Refining Option ' + (activeOption + 1) + ' (iteration ' + (iterations[activeOption] + 1) + ')...', 'loading');
+      const newIterIndex = blocks[activeOption].length;
+      setStatus('Refining Option ' + (activeOption + 1) + ' → v' + (newIterIndex + 1) + '...', 'loading');
       document.getElementById('refineBtn').disabled = true;
+
+      // Add loading placeholder
+      blocks[activeOption].push({ loading: true });
+      activeIteration = newIterIndex;
+      updateIterationTabs();
+      displayCurrentBlock();
 
       try {
         const formData = new FormData();
@@ -2530,27 +3032,25 @@ function handleBlockTestUI(env: Env): Response {
           body: formData
         });
 
-        // Get response as text first to handle non-JSON responses
         const responseText = await response.text();
         let result;
         try {
           result = JSON.parse(responseText);
         } catch (parseError) {
           console.error('Non-JSON response:', responseText.substring(0, 500));
-          setStatus('Server returned non-JSON response (status ' + response.status + '): ' + responseText.substring(0, 200), 'error');
-          return;
+          throw new Error('Server returned non-JSON response');
         }
 
         if (result.success) {
-          blocks[activeOption] = {
+          blocks[activeOption][newIterIndex] = {
             html: result.html,
             css: result.css,
             js: result.js,
             blockName: result.blockName
           };
-          iterations[activeOption]++;
 
-          displayCurrentOption();
+          updateIterationTabs();
+          displayCurrentBlock();
 
           // Show comparison images
           document.getElementById('imagesRow').style.display = 'grid';
@@ -2560,14 +3060,111 @@ function handleBlockTestUI(env: Env): Response {
           }
 
           updatePreview();
-          setStatus('Option ' + (activeOption + 1) + ' refined! ' + (result.refinementNotes || ''), 'success');
+          setStatus('Option ' + (activeOption + 1) + ' v' + (newIterIndex + 1) + ' created! ' + (result.refinementNotes || ''), 'success');
         } else {
-          setStatus('Error: ' + result.error, 'error');
+          throw new Error(result.error);
         }
       } catch (error) {
+        // Remove loading placeholder on error
+        blocks[activeOption].pop();
+        activeIteration = blocks[activeOption].length - 1;
+        updateIterationTabs();
+        displayCurrentBlock();
         setStatus('Error: ' + error.message, 'error');
       } finally {
         document.getElementById('refineBtn').disabled = false;
+      }
+    }
+
+    async function pickWinner() {
+      // Get the latest iteration for each option that has blocks
+      const latestBlocks = [];
+      for (let i = 0; i < 3; i++) {
+        const optionBlocks = blocks[i];
+        if (optionBlocks.length > 0) {
+          const latestBlock = optionBlocks[optionBlocks.length - 1];
+          if (latestBlock && !latestBlock.loading) {
+            latestBlocks.push({
+              html: latestBlock.html,
+              css: latestBlock.css,
+              js: latestBlock.js,
+              blockName: latestBlock.blockName,
+              optionIndex: i
+            });
+          }
+        }
+      }
+
+      if (latestBlocks.length < 2) {
+        setStatus('Need at least 2 options to pick a winner', 'error');
+        return;
+      }
+
+      if (!originalScreenshot) {
+        setStatus('No original screenshot available', 'error');
+        return;
+      }
+
+      setStatus('Analyzing ' + latestBlocks.length + ' options with Claude Vision...', 'loading');
+      document.getElementById('winnerBtn').disabled = true;
+      document.getElementById('winnerResult').style.display = 'none';
+
+      try {
+        const formData = new FormData();
+        formData.append('screenshot', originalScreenshot);
+        formData.append('blocks', JSON.stringify(latestBlocks));
+
+        const response = await fetch('/block-winner', {
+          method: 'POST',
+          body: formData
+        });
+
+        const result = await response.json();
+
+        if (result.success) {
+          // Show the winner result
+          const winnerResult = document.getElementById('winnerResult');
+          winnerResult.style.display = 'block';
+
+          document.getElementById('winnerTitle').textContent =
+            'Winner: Option ' + (result.winner.optionIndex + 1) + ' (Confidence: ' + result.confidence + '%)';
+          document.getElementById('winnerReasoning').textContent = result.reasoning;
+
+          // Build score cards
+          let scoresHtml = '';
+          for (const score of result.scores) {
+            const isWinner = score.option === (result.winner.optionIndex + 1);
+            scoresHtml += '<div class="score-card' + (isWinner ? ' winner' : '') + '">';
+            scoresHtml += '<div class="option-name">Option ' + score.option + '</div>';
+            scoresHtml += '<div class="score">' + score.score + '</div>';
+            scoresHtml += '<div class="notes">' + score.notes + '</div>';
+            scoresHtml += '</div>';
+          }
+          document.getElementById('winnerScores').innerHTML = scoresHtml;
+
+          // Switch to the winning option/iteration
+          const winnerOptionIndex = result.winner.optionIndex;
+          const winnerIterationIndex = blocks[winnerOptionIndex].length - 1;
+          activeOption = winnerOptionIndex;
+          activeIteration = winnerIterationIndex;
+
+          // Update UI to show the winner
+          document.querySelectorAll('.option-tab').forEach((t, i) => {
+            t.classList.remove('active');
+            if (i === winnerOptionIndex) t.classList.add('active');
+          });
+          updateIterationTabs();
+          displayCurrentBlock();
+          updatePreview();
+
+          setStatus('Winner selected: Option ' + (winnerOptionIndex + 1) + '!', 'success');
+        } else {
+          throw new Error(result.error);
+        }
+      } catch (error) {
+        setStatus('Error picking winner: ' + error.message, 'error');
+      } finally {
+        document.getElementById('winnerBtn').disabled = false;
       }
     }
   </script>
