@@ -320,14 +320,26 @@ export async function generateCodeEnhanced(
   extractedCssStyles?: string,
   imageMediaType: 'image/png' | 'image/jpeg' = 'image/png'
 ): Promise<EnhancedBlockCode> {
+  // Build numbered image reference list - Claude will use these by index
+  const imageRefList = extractedContent.images.length > 0
+    ? `
+AVAILABLE IMAGES (use ONLY these by reference number):
+${extractedContent.images.map((img, i) => `[IMG_${i + 1}] - ${img.alt || 'image'} (${img.role})`).join('\n')}
+
+CRITICAL: When you need an image in your HTML, use data-img-ref attribute with the number:
+  <img data-img-ref="1" alt="description">
+DO NOT write any src attribute. I will inject the real URLs automatically.
+DO NOT invent or guess image URLs. ONLY use the numbered references above.
+`
+    : '';
+
   // Build a rich prompt with all context
   const contentSummary = `
 EXTRACTED CONTENT:
 - Headings: ${extractedContent.headings.map(h => `H${h.level}: "${h.text}"`).join(', ')}
 - Paragraphs: ${extractedContent.paragraphs.map(p => `"${p.substring(0, 50)}..."`).join(', ')}
-- Images: ${extractedContent.images.map(i => `${i.role}: ${i.src}`).join('\n  ')}
 - CTAs: ${extractedContent.ctas.map(c => `"${c.text}" (${c.style}) -> ${c.href}`).join(', ')}
-`;
+${imageRefList}`;
 
   const structureSummary = `
 COMPONENT ANALYSIS:
@@ -376,7 +388,7 @@ The JS decoration function transforms this into the final rendered structure.
 ## Critical Instructions
 
 1. **Match the visual design EXACTLY** - use the screenshot AND the extracted CSS values
-2. **Use the EXACT content** from EXTRACTED CONTENT above - real URLs, real text
+2. **Use the EXACT content** from EXTRACTED CONTENT above - real text, real CTAs
 3. **Follow the structure** described in COMPONENT ANALYSIS
 4. **Use the EXACT CSS values** from EXTRACTED CSS STYLES - do not guess colors or fonts
 5. **Key visual elements to match**:
@@ -384,8 +396,10 @@ The JS decoration function transforms this into the final rendered structure.
    - What is the exact heading color? Use it.
    - What is the exact font-size? Use it.
    - Is there a card background or is content directly on the page?
-6. **NEVER invent image URLs** - only use URLs from EXTRACTED CONTENT
-7. **NEVER use base64 or localhost URLs**
+6. **IMAGES: Use data-img-ref="N" attribute ONLY** - reference images by their [IMG_N] number
+   - Example: <img data-img-ref="1" alt="Logo">
+   - NEVER write src="..." - I will inject real URLs
+   - NEVER invent, guess, or use placeholder URLs
 
 ## Return Format
 
@@ -428,6 +442,88 @@ Return ONLY the JSON object.`;
     console.error('Failed to parse generated code:', response.substring(0, 500));
     throw new Error('Failed to parse generated code');
   }
+}
+
+/**
+ * Post-process generated HTML to inject real image URLs
+ * Replaces data-img-ref="N" attributes with actual src URLs
+ */
+function injectImageUrls(
+  html: string,
+  images: Array<{ src: string; alt: string; role: string }>
+): string {
+  if (!images.length) return html;
+
+  let result = html;
+  let injectedCount = 0;
+
+  // Replace data-img-ref="N" with src="actual-url"
+  // Matches: <img data-img-ref="1" ...> or <img ... data-img-ref="1" ...>
+  result = result.replace(
+    /<img([^>]*?)data-img-ref=["'](\d+)["']([^>]*?)>/gi,
+    (match, before, refNum, after) => {
+      const index = parseInt(refNum, 10) - 1; // Convert 1-based to 0-based
+      if (index >= 0 && index < images.length) {
+        const img = images[index];
+        injectedCount++;
+        // Remove data-img-ref and add src
+        const cleanBefore = before.replace(/\s*src=["'][^"']*["']/gi, '');
+        const cleanAfter = after.replace(/\s*src=["'][^"']*["']/gi, '');
+        return `<img${cleanBefore} src="${img.src}"${cleanAfter}>`;
+      }
+      console.warn(`Image reference ${refNum} out of bounds (have ${images.length} images)`);
+      return match;
+    }
+  );
+
+  // Also handle case where Claude wrote src="" or src="placeholder"
+  // Replace any remaining placeholder/empty src with first unused image
+  const usedIndices = new Set<number>();
+  result.replace(/data-img-ref=["'](\d+)["']/gi, (_, num) => {
+    usedIndices.add(parseInt(num, 10) - 1);
+    return '';
+  });
+
+  // Find images with placeholder URLs and replace them
+  let unusedImageIndex = 0;
+  result = result.replace(
+    /<img([^>]*?)src=["']([^"']*)["']([^>]*?)>/gi,
+    (match, before, currentSrc, after) => {
+      // Skip if it's already a real URL from our images
+      if (images.some(img => img.src === currentSrc)) {
+        return match;
+      }
+
+      // Skip if it looks like a valid external URL (not placeholder)
+      if (currentSrc.startsWith('http') &&
+          !currentSrc.includes('placeholder') &&
+          !currentSrc.includes('example.com') &&
+          !currentSrc.includes('via.placeholder') &&
+          !currentSrc.includes('picsum') &&
+          !currentSrc.includes('unsplash.it')) {
+        return match;
+      }
+
+      // Find next unused image
+      while (unusedImageIndex < images.length && usedIndices.has(unusedImageIndex)) {
+        unusedImageIndex++;
+      }
+
+      if (unusedImageIndex < images.length) {
+        const img = images[unusedImageIndex];
+        usedIndices.add(unusedImageIndex);
+        unusedImageIndex++;
+        injectedCount++;
+        console.log(`Replaced placeholder "${currentSrc}" with "${img.src}"`);
+        return `<img${before} src="${img.src}"${after}>`;
+      }
+
+      return match;
+    }
+  );
+
+  console.log(`Injected ${injectedCount} image URLs into generated HTML`);
+  return result;
 }
 
 /**
@@ -489,6 +585,10 @@ export async function generateBlockEnhanced(
   }
   const block = await generateCodeEnhanced(screenshotBase64, description, content, config, extractedCssStyles, imageMediaType);
   console.log(`  Generated block: ${block.blockName}`);
+
+  // Step 4: Post-process to inject real image URLs
+  console.log('Step 4: Injecting real image URLs...');
+  block.html = injectImageUrls(block.html, content.images);
 
   return block;
 }

@@ -724,8 +724,15 @@ async function generateBlockFromDescriptionWithClaude(
   extractedHtml: string,
   config: AnthropicConfig
 ): Promise<EnhancedBlockCode> {
-  const imageList = liveImages.length > 0
-    ? `\n\n## ACTUAL IMAGES FROM THIS SECTION (use these exact URLs):\n${liveImages.map(img => `- ${img.src}`).join('\n')}`
+  // Build numbered image reference list - Claude references by index, we inject real URLs
+  const imageRefList = liveImages.length > 0
+    ? `\n\n## AVAILABLE IMAGES (use ONLY these by reference number):
+${liveImages.map((img, i) => `[IMG_${i + 1}] - ${img.role}`).join('\n')}
+
+CRITICAL: When you need an image, use data-img-ref attribute:
+  <img data-img-ref="1" alt="description">
+DO NOT write src="..." - real URLs will be injected automatically.
+DO NOT invent or guess image URLs.`
     : '';
 
   // Truncate HTML if too long but keep structure visible
@@ -745,16 +752,16 @@ DESCRIPTION: ${sectionDescription}
 ## CRITICAL RULES - YOU MUST FOLLOW THESE
 
 1. **USE THE EXACT TEXT from the extracted HTML** - Do NOT invent, paraphrase, or modify any text content
-2. **USE THE EXACT IMAGE URLs** from the extracted HTML or image list - Do NOT use placeholder URLs
+2. **IMAGES: Use data-img-ref="N" ONLY** - reference images by [IMG_N] number, NO src attribute
 3. **MATCH THE VISUAL DESIGN** from the screenshot - colors, fonts, layout, spacing
-4. The generated block MUST contain the same content as the original - same headings, same paragraphs, same images, same links
+4. The generated block MUST contain the same content as the original - same headings, same paragraphs, same links
 
 ## EXTRACTED HTML FROM THE PAGE (this is the actual content - use it!)
 
 \`\`\`html
 ${htmlPreview}
 \`\`\`
-${imageList}
+${imageRefList}
 
 ## EDS Block Requirements
 
@@ -772,7 +779,7 @@ The JS decorate() function transforms this into the final rendered HTML.
 
 ## What You Need to Generate
 
-1. **HTML**: EDS block markup containing the EXACT text and image URLs from the extracted HTML
+1. **HTML**: EDS block markup with EXACT text, using data-img-ref="N" for images
 2. **CSS**: Styles that recreate the visual appearance from the screenshot
 3. **JS**: A decorate(block) function that transforms the EDS markup into rendered HTML
 
@@ -782,12 +789,12 @@ Return JSON:
 {
   "blockName": "descriptive-block-name",
   "componentType": "hero|cards|columns|tabs|content|etc",
-  "html": "<!-- EDS block with EXACT content from extracted HTML -->",
+  "html": "<!-- EDS block - use data-img-ref for images -->",
   "css": "/* CSS matching the screenshot design */",
   "js": "/* ES module: export default function decorate(block) { ... } */"
 }
 
-REMEMBER: The text in your HTML output MUST match the text in the extracted HTML exactly. Do not invent content.
+REMEMBER: Use data-img-ref="N" for images. Do NOT write src attributes.
 
 Return ONLY the JSON object.`;
 
@@ -807,10 +814,16 @@ Return ONLY the JSON object.`;
 
     const parsed = JSON.parse(jsonStr);
 
+    // Post-process to inject real image URLs
+    let html = parsed.html || '';
+    if (liveImages.length > 0) {
+      html = injectImageUrlsIntoHtml(html, liveImages);
+    }
+
     return {
       blockName: parsed.blockName || 'generated-block',
       componentType: parsed.componentType || 'content',
-      html: parsed.html || '',
+      html,
       css: parsed.css || '',
       js: parsed.js || '',
       description: {
@@ -824,6 +837,66 @@ Return ONLY the JSON object.`;
     console.error('Failed to parse generation response:', response.substring(0, 500));
     throw new Error('Failed to parse generation response');
   }
+}
+
+/**
+ * Inject real image URLs into HTML by replacing data-img-ref attributes
+ */
+function injectImageUrlsIntoHtml(
+  html: string,
+  images: { src: string; role: string }[]
+): string {
+  if (!images.length) return html;
+
+  let result = html;
+  let injectedCount = 0;
+
+  // Replace data-img-ref="N" with src="actual-url"
+  result = result.replace(
+    /<img([^>]*?)data-img-ref=["'](\d+)["']([^>]*?)>/gi,
+    (match, before, refNum, after) => {
+      const index = parseInt(refNum, 10) - 1;
+      if (index >= 0 && index < images.length) {
+        const img = images[index];
+        injectedCount++;
+        const cleanBefore = before.replace(/\s*src=["'][^"']*["']/gi, '');
+        const cleanAfter = after.replace(/\s*src=["'][^"']*["']/gi, '');
+        return `<img${cleanBefore} src="${img.src}"${cleanAfter}>`;
+      }
+      console.warn(`Image reference ${refNum} out of bounds (have ${images.length} images)`);
+      return match;
+    }
+  );
+
+  // Fallback: replace placeholder src values with real URLs
+  const usedIndices = new Set<number>();
+  let unusedImageIndex = 0;
+  result = result.replace(
+    /<img([^>]*?)src=["']([^"']*)["']([^>]*?)>/gi,
+    (match, before, currentSrc, after) => {
+      if (images.some(img => img.src === currentSrc)) return match;
+      if (currentSrc.startsWith('http') &&
+          !currentSrc.includes('placeholder') &&
+          !currentSrc.includes('example.com')) {
+        return match;
+      }
+      while (unusedImageIndex < images.length && usedIndices.has(unusedImageIndex)) {
+        unusedImageIndex++;
+      }
+      if (unusedImageIndex < images.length) {
+        const img = images[unusedImageIndex];
+        usedIndices.add(unusedImageIndex);
+        unusedImageIndex++;
+        injectedCount++;
+        console.log(`Replaced placeholder "${currentSrc}" with "${img.src}"`);
+        return `<img${before} src="${img.src}"${after}>`;
+      }
+      return match;
+    }
+  );
+
+  console.log(`Injected ${injectedCount} image URLs into generated HTML`);
+  return result;
 }
 
 /**

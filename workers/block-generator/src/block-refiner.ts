@@ -151,6 +151,81 @@ export async function renderBlockToScreenshot(
 }
 
 /**
+ * Extract all URLs from HTML (src, href attributes)
+ */
+function extractUrlsFromHtml(html: string): Map<string, string[]> {
+  const urlMap = new Map<string, string[]>();
+
+  // Extract src attributes (images, videos, etc.)
+  const srcMatches = html.matchAll(/src=["']([^"']+)["']/gi);
+  for (const match of srcMatches) {
+    if (!urlMap.has('src')) urlMap.set('src', []);
+    urlMap.get('src')!.push(match[1]);
+  }
+
+  // Extract href attributes (links)
+  const hrefMatches = html.matchAll(/href=["']([^"']+)["']/gi);
+  for (const match of hrefMatches) {
+    if (!urlMap.has('href')) urlMap.set('href', []);
+    urlMap.get('href')!.push(match[1]);
+  }
+
+  // Extract background-image URLs from inline styles
+  const bgMatches = html.matchAll(/url\(["']?([^"')]+)["']?\)/gi);
+  for (const match of bgMatches) {
+    if (!urlMap.has('bg')) urlMap.set('bg', []);
+    urlMap.get('bg')!.push(match[1]);
+  }
+
+  return urlMap;
+}
+
+/**
+ * Restore original URLs in refined HTML
+ */
+function restoreOriginalUrls(refinedHtml: string, originalHtml: string): string {
+  const originalUrls = extractUrlsFromHtml(originalHtml);
+  let result = refinedHtml;
+
+  // Get original src URLs
+  const originalSrcs = originalUrls.get('src') || [];
+  let srcIndex = 0;
+
+  // Replace src attributes with original URLs in order
+  result = result.replace(/src=["']([^"']+)["']/gi, (match, currentUrl) => {
+    // If this URL is already one of the originals, keep it
+    if (originalSrcs.includes(currentUrl)) {
+      return match;
+    }
+    // Otherwise, replace with the next original URL
+    if (srcIndex < originalSrcs.length) {
+      const originalUrl = originalSrcs[srcIndex++];
+      console.log(`Restored URL: "${currentUrl.substring(0, 50)}..." → "${originalUrl.substring(0, 50)}..."`);
+      return `src="${originalUrl}"`;
+    }
+    return match;
+  });
+
+  // Get original href URLs
+  const originalHrefs = originalUrls.get('href') || [];
+  let hrefIndex = 0;
+
+  // Replace href attributes with original URLs in order
+  result = result.replace(/href=["']([^"']+)["']/gi, (match, currentUrl) => {
+    if (originalHrefs.includes(currentUrl)) {
+      return match;
+    }
+    if (hrefIndex < originalHrefs.length) {
+      const originalUrl = originalHrefs[hrefIndex++];
+      return `href="${originalUrl}"`;
+    }
+    return match;
+  });
+
+  return result;
+}
+
+/**
  * Analyze visual differences and suggest refinements using Claude Vision
  */
 export async function analyzeAndRefine(
@@ -206,17 +281,24 @@ ${currentBlock.js}
 
 Analyze the visual differences and provide REFINED code that will make the generated block look MORE like the original.
 
+## CRITICAL RULES - DO NOT VIOLATE
+
+1. **NEVER change any URLs** - Keep ALL src="..." and href="..." values EXACTLY as they are
+2. **NEVER change image URLs** - The image sources must remain identical
+3. **NEVER change link URLs** - All href values must stay the same
+4. **Only modify CSS and HTML structure** - Fix styling, not content
+
 ${focusInstructions}
 
 Return ONLY a JSON object with the refined code:
 {
-  "html": "refined HTML here",
+  "html": "refined HTML with EXACT SAME URLs",
   "css": "refined CSS here",
   "js": "refined JavaScript here",
   "notes": "brief description of what was changed"
 }
 
-Make targeted changes to fix the visual differences you observe.`;
+Make targeted changes to fix the visual differences you observe. DO NOT CHANGE ANY URLs.`;
 
   const response = await callClaudeWithImages(
     [originalScreenshotBase64, generatedScreenshotBase64],
@@ -239,8 +321,11 @@ Make targeted changes to fix the visual differences you observe.`;
     notes?: string;
   };
 
+  // CRITICAL: Restore original URLs - Claude might have changed them despite instructions
+  const restoredHtml = restoreOriginalUrls(refined.html, currentBlock.html);
+
   return {
-    html: refined.html,
+    html: restoredHtml,
     css: refined.css,
     js: refined.js,
     blockName: currentBlock.blockName
