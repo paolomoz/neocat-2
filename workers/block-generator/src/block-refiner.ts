@@ -1,7 +1,25 @@
-import puppeteer, { Browser } from '@cloudflare/puppeteer';
-import { decode, encode } from 'fast-png';
-import pixelmatch from 'pixelmatch';
+import { Browser } from '@cloudflare/puppeteer';
 import { AnthropicConfig } from './design-analyzer';
+
+/**
+ * Block code structure
+ */
+export interface BlockCode {
+  html: string;
+  css: string;
+  js: string;
+  blockName?: string;
+}
+
+/**
+ * Refinement result
+ */
+export interface RefinementResult {
+  block: BlockCode;
+  refinementApplied: boolean;
+  refinementNotes?: string;
+  generatedScreenshot?: string; // Base64 of the rendered block screenshot
+}
 
 /**
  * Compress an image for Claude API (5MB limit)
@@ -56,39 +74,6 @@ async function compressImageForClaude(
   } finally {
     await page.close();
   }
-}
-
-/**
- * Result of comparing two screenshots
- */
-export interface DiffResult {
-  score: number;           // 0-100, percentage of different pixels
-  totalPixels: number;
-  diffPixels: number;
-  diffImageBase64: string; // PNG image highlighting differences
-  width: number;
-  height: number;
-}
-
-/**
- * Block code structure
- */
-export interface BlockCode {
-  html: string;
-  css: string;
-  js: string;
-  blockName?: string;
-}
-
-/**
- * Refinement result
- */
-export interface RefinementResult {
-  block: BlockCode;
-  diff: DiffResult;
-  refinementApplied: boolean;
-  refinementNotes?: string;
-  generatedScreenshot?: string; // Base64 of the rendered block screenshot
 }
 
 /**
@@ -166,111 +151,11 @@ export async function renderBlockToScreenshot(
 }
 
 /**
- * Crop image data to specified dimensions
- */
-function cropImageData(
-  data: Uint8Array | Uint8ClampedArray,
-  srcWidth: number,
-  srcHeight: number,
-  targetWidth: number,
-  targetHeight: number
-): Uint8Array {
-  const cropped = new Uint8Array(targetWidth * targetHeight * 4);
-  for (let y = 0; y < targetHeight; y++) {
-    for (let x = 0; x < targetWidth; x++) {
-      const srcIdx = (y * srcWidth + x) * 4;
-      const dstIdx = (y * targetWidth + x) * 4;
-      cropped[dstIdx] = data[srcIdx];
-      cropped[dstIdx + 1] = data[srcIdx + 1];
-      cropped[dstIdx + 2] = data[srcIdx + 2];
-      cropped[dstIdx + 3] = data[srcIdx + 3];
-    }
-  }
-  return cropped;
-}
-
-/**
- * Compare two screenshots using pixelmatch
- */
-export async function compareScreenshots(
-  originalBase64: string,
-  generatedBase64: string
-): Promise<DiffResult> {
-  // Decode PNGs using fast-png
-  const originalBuffer = Buffer.from(originalBase64, 'base64');
-  const generatedBuffer = Buffer.from(generatedBase64, 'base64');
-
-  const originalPng = decode(originalBuffer);
-  const generatedPng = decode(generatedBuffer);
-
-  // Use the smaller dimensions to crop both images
-  const width = Math.min(originalPng.width, generatedPng.width);
-  const height = Math.min(originalPng.height, generatedPng.height);
-
-  // Crop both images to the same size
-  const originalData = cropImageData(
-    new Uint8Array(originalPng.data),
-    originalPng.width,
-    originalPng.height,
-    width,
-    height
-  );
-  const generatedData = cropImageData(
-    new Uint8Array(generatedPng.data),
-    generatedPng.width,
-    generatedPng.height,
-    width,
-    height
-  );
-
-  // Create diff image data buffer (RGBA)
-  const diffData = new Uint8Array(width * height * 4);
-
-  // Run pixelmatch
-  const diffPixels = pixelmatch(
-    originalData,
-    generatedData,
-    diffData,
-    width,
-    height,
-    {
-      threshold: 0.1,          // Color difference threshold
-      includeAA: false,        // Ignore anti-aliasing differences
-      alpha: 0.1,              // Blend original image into diff
-      diffColor: [255, 0, 0],  // Red for differences
-      diffColorAlt: [0, 255, 0] // Green for anti-aliased differences
-    }
-  );
-
-  const totalPixels = width * height;
-  const score = (diffPixels / totalPixels) * 100;
-
-  // Encode diff image to base64 using fast-png
-  const diffBuffer = encode({
-    width,
-    height,
-    data: diffData,
-    channels: 4
-  });
-  const diffImageBase64 = Buffer.from(diffBuffer).toString('base64');
-
-  return {
-    score: Math.round(score * 100) / 100,  // Round to 2 decimal places
-    totalPixels,
-    diffPixels,
-    diffImageBase64,
-    width,
-    height
-  };
-}
-
-/**
  * Analyze visual differences and suggest refinements using Claude Vision
  */
 export async function analyzeAndRefine(
   originalScreenshotBase64: string,
   generatedScreenshotBase64: string,
-  diffImageBase64: string,
   currentBlock: BlockCode,
   config: AnthropicConfig,
   userPrompt?: string,
@@ -296,10 +181,11 @@ Also consider:
 - Dimensions (widths, heights)`;
   }
 
-  const prompt = `You are an expert CSS developer. I'm showing you three images:
-1. The ORIGINAL design (target)
-2. The GENERATED block (current attempt)
-3. A DIFF image where RED pixels show differences
+  const prompt = `You are an expert CSS developer. I'm showing you two images:
+1. The ORIGINAL design (target) - this is what we want to match
+2. The GENERATED block (current attempt) - this is what we've created so far
+
+Compare these two images visually and identify the differences.
 
 The current block code is:
 
@@ -318,7 +204,7 @@ JavaScript:
 ${currentBlock.js}
 \`\`\`
 
-Analyze the differences and provide REFINED code that will make the generated block look MORE like the original.
+Analyze the visual differences and provide REFINED code that will make the generated block look MORE like the original.
 
 ${focusInstructions}
 
@@ -330,12 +216,12 @@ Return ONLY a JSON object with the refined code:
   "notes": "brief description of what was changed"
 }
 
-Make minimal changes - only fix what's visibly different in the diff image.`;
+Make targeted changes to fix the visual differences you observe.`;
 
-  const response = await callClaudeWithMultipleImages(
-    [originalScreenshotBase64, generatedScreenshotBase64, diffImageBase64],
-    ['Original design (target)', 'Generated block (current)', 'Diff image (red = differences)'],
-    [originalMediaType, generatedMediaType, 'image/png'], // diff image is always PNG
+  const response = await callClaudeWithImages(
+    [originalScreenshotBase64, generatedScreenshotBase64],
+    ['Original design (target)', 'Generated block (current)'],
+    [originalMediaType, generatedMediaType],
     prompt,
     config
   );
@@ -364,7 +250,7 @@ Make minimal changes - only fix what's visibly different in the diff image.`;
 /**
  * Helper to call Claude API with multiple images
  */
-async function callClaudeWithMultipleImages(
+async function callClaudeWithImages(
   imagesBase64: string[],
   imageLabels: string[],
   imageMediaTypes: Array<'image/png' | 'image/jpeg'>,
@@ -450,7 +336,7 @@ async function callClaudeWithMultipleImages(
 }
 
 /**
- * Full refinement pipeline: render, compare, analyze, refine
+ * Full refinement pipeline: render, analyze with Claude Vision, refine
  */
 export async function refineBlock(
   browser: Browser,
@@ -458,45 +344,26 @@ export async function refineBlock(
   currentBlock: BlockCode,
   config: AnthropicConfig,
   viewport: { width: number; height: number } = { width: 1440, height: 900 },
-  diffThreshold: number = 5, // Don't refine if diff is below this %
   userPrompt?: string
 ): Promise<RefinementResult> {
   // Step 1: Render current block
   console.log('Rendering generated block...');
   const generatedScreenshot = await renderBlockToScreenshot(browser, currentBlock, viewport);
 
-  // Step 2: Compare with original
-  console.log('Comparing screenshots...');
-  const diff = await compareScreenshots(originalScreenshotBase64, generatedScreenshot);
-  console.log(`  Diff score: ${diff.score}% (${diff.diffPixels}/${diff.totalPixels} pixels)`);
+  // Step 2: Compress images for Claude API (5MB limit)
+  console.log('Preparing images for Claude Vision...');
+  const compressedOriginal = await compressImageForClaude(browser, originalScreenshotBase64);
+  const compressedGenerated = await compressImageForClaude(browser, generatedScreenshot);
 
-  // Step 3: If diff is acceptable and no user prompt, return as-is
-  if (diff.score < diffThreshold && !userPrompt) {
-    console.log(`  Diff below threshold (${diffThreshold}%), no refinement needed`);
-    return {
-      block: currentBlock,
-      diff,
-      refinementApplied: false,
-      refinementNotes: `Diff score ${diff.score}% is below threshold ${diffThreshold}%`,
-      generatedScreenshot
-    };
-  }
-
-  // Step 4: Analyze and refine
-  console.log('Analyzing differences and generating refinements...');
+  // Step 3: Analyze and refine using Claude Vision
+  console.log('Analyzing differences with Claude Vision...');
   if (userPrompt) {
     console.log(`  User prompt: ${userPrompt.substring(0, 100)}...`);
   }
 
-  // Compress images for Claude API (5MB limit) before sending
-  const compressedOriginal = await compressImageForClaude(browser, originalScreenshotBase64);
-  const compressedGenerated = await compressImageForClaude(browser, generatedScreenshot);
-  // Diff image is small (already generated), no need to compress
-
   const refinedBlock = await analyzeAndRefine(
     compressedOriginal.data,
     compressedGenerated.data,
-    diff.diffImageBase64,
     currentBlock,
     config,
     userPrompt,
@@ -504,17 +371,14 @@ export async function refineBlock(
     compressedGenerated.mediaType
   );
 
-  // Step 5: Re-render and re-compare to get new diff score
+  // Step 4: Re-render refined block for preview
   console.log('Re-rendering refined block...');
   const refinedScreenshot = await renderBlockToScreenshot(browser, refinedBlock, viewport);
-  const refinedDiff = await compareScreenshots(originalScreenshotBase64, refinedScreenshot);
-  console.log(`  New diff score: ${refinedDiff.score}% (was ${diff.score}%)`);
 
   return {
     block: refinedBlock,
-    diff: refinedDiff,
     refinementApplied: true,
-    refinementNotes: `Reduced diff from ${diff.score}% to ${refinedDiff.score}%`,
+    refinementNotes: 'Refined using Claude Vision analysis',
     generatedScreenshot: refinedScreenshot
   };
 }

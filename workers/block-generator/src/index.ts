@@ -20,7 +20,7 @@ import { extractComputedStyles, formatStylesForPrompt } from './style-extractor'
 import { detectBlocks, captureBlockScreenshot, DetectedBlock as BBoxBlock, BoundingBox } from './bbox-detector';
 import { detectBlocksHybrid, ClassifiedBlock, HybridDetectionResult } from './hybrid-detector';
 import { analyzePage, PageAnalysisResult, IdentifiedSection } from './page-analyzer';
-import { refineBlock, compareScreenshots, renderBlockToScreenshot, BlockCode, DiffResult } from './block-refiner';
+import { refineBlock, renderBlockToScreenshot, BlockCode } from './block-refiner';
 import puppeteer, { Page } from '@cloudflare/puppeteer';
 
 /**
@@ -1889,7 +1889,6 @@ async function handleBlockRefine(request: Request, env: Env): Promise<Response> 
         currentBlock,
         anthropicConfig,
         { width: 1440, height: 900 },
-        5, // 5% diff threshold
         refinePrompt || undefined
       );
 
@@ -1900,7 +1899,6 @@ async function handleBlockRefine(request: Request, env: Env): Promise<Response> 
         html: result.block.html,
         js: result.block.js,
         css: result.block.css,
-        diff: result.diff,
         refinementApplied: result.refinementApplied,
         refinementNotes: result.refinementNotes,
         generatedScreenshot: result.generatedScreenshot
@@ -2030,20 +2028,6 @@ function handleBlockTestUI(env: Env): Response {
       background: #f8d7da;
       color: #721c24;
     }
-    .diff-info {
-      margin-top: 15px;
-      padding: 15px;
-      background: #f8f9fa;
-      border-radius: 4px;
-    }
-    .diff-score {
-      font-size: 24px;
-      font-weight: bold;
-      color: #333;
-    }
-    .diff-score.good { color: #28a745; }
-    .diff-score.medium { color: #ffc107; }
-    .diff-score.bad { color: #dc3545; }
     .preview-container {
       margin-top: 20px;
       border: 1px solid #ddd;
@@ -2221,25 +2205,14 @@ function handleBlockTestUI(env: Env): Response {
           <pre id="generatedJs">No block generated yet</pre>
         </div>
 
-        <div id="diffInfo" class="diff-info" style="display: none;">
-          <div>Diff Score: <span id="diffScore" class="diff-score">-</span>%</div>
-          <div style="margin-top: 5px; font-size: 12px; color: #666;">
-            <span id="diffPixels">-</span> different pixels out of <span id="totalPixels">-</span>
-          </div>
-        </div>
-
         <div id="imagesRow" class="images-row" style="display: none;">
           <div class="image-box">
             <img id="originalImg" alt="Original">
-            <p>Original</p>
+            <p>Original Screenshot</p>
           </div>
           <div class="image-box">
             <img id="generatedImg" alt="Generated">
-            <p>Generated</p>
-          </div>
-          <div class="image-box">
-            <img id="diffImg" alt="Diff">
-            <p>Diff (red = different)</p>
+            <p>Generated Block</p>
           </div>
         </div>
 
@@ -2478,31 +2451,15 @@ function handleBlockTestUI(env: Env): Response {
           document.getElementById('generatedJs').textContent = result.js;
           document.getElementById('iterationCount').textContent = 'Iteration: ' + iterations;
 
-          // Show diff info
-          if (result.diff) {
-            document.getElementById('diffInfo').style.display = 'block';
-            const scoreEl = document.getElementById('diffScore');
-            scoreEl.textContent = result.diff.score.toFixed(2);
-            scoreEl.className = 'diff-score ' + (result.diff.score < 5 ? 'good' : result.diff.score < 15 ? 'medium' : 'bad');
-            document.getElementById('diffPixels').textContent = result.diff.diffPixels.toLocaleString();
-            document.getElementById('totalPixels').textContent = result.diff.totalPixels.toLocaleString();
-
-            // Show images
-            if (result.diff.diffImageBase64) {
-              document.getElementById('imagesRow').style.display = 'grid';
-              document.getElementById('originalImg').src = document.getElementById('screenshotImg').src;
-              document.getElementById('diffImg').src = 'data:image/png;base64,' + result.diff.diffImageBase64;
-              // Show generated screenshot if available
-              if (result.generatedScreenshot) {
-                document.getElementById('generatedImg').src = 'data:image/png;base64,' + result.generatedScreenshot;
-              }
-            }
+          // Show comparison images
+          document.getElementById('imagesRow').style.display = 'grid';
+          document.getElementById('originalImg').src = document.getElementById('screenshotImg').src;
+          if (result.generatedScreenshot) {
+            document.getElementById('generatedImg').src = 'data:image/png;base64,' + result.generatedScreenshot;
           }
 
           updatePreview();
-          setStatus(result.refinementApplied ?
-            'Block refined! ' + result.refinementNotes :
-            'No refinement needed - diff below threshold', 'success');
+          setStatus('Block refined! ' + (result.refinementNotes || ''), 'success');
         } else {
           setStatus('Error: ' + result.error, 'error');
         }
