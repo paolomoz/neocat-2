@@ -1,0 +1,9 @@
+.single-commit-test {
+  padding: 1rem;
+  border: 2px solid #4CAF50;
+  border-radius: 4px;
+}
+
+.single-commit-test.decorated {
+  background: #E8F5E9;
+}
