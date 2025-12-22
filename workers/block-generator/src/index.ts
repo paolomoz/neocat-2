@@ -784,23 +784,32 @@ ${imageRefList}
 
 ## EDS Block Requirements
 
-EDS blocks have this structure before decoration:
+EDS blocks have this **authoring structure** (what authors see in DA):
 \`\`\`html
 <div class="{block-name}">
   <div><!-- row 1 -->
-    <div><!-- cell 1 --></div>
-    <div><!-- cell 2 --></div>
+    <div><!-- cell 1: content --></div>
+    <div><!-- cell 2: content --></div>
   </div>
 </div>
 \`\`\`
 
-The JS decorate() function transforms this into the final rendered HTML.
+The JS **decorate(block)** function transforms this simple structure into the **rendered DOM**:
+\`\`\`javascript
+export default function decorate(block) {
+  // Read content from the simple row/cell structure
+  // Build the rich rendered HTML with wrapper elements, classes, etc.
+  // Replace block.innerHTML with the rendered structure
+}
+\`\`\`
+
+The **CSS** styles the **rendered output** (what decorate() produces), NOT the authoring HTML.
 
 ## What You Need to Generate
 
-1. **HTML**: EDS block markup with EXACT text, using data-img-ref="N" for images
-2. **CSS**: Styles that recreate the visual appearance from the screenshot
-3. **JS**: A decorate(block) function that transforms the EDS markup into rendered HTML
+1. **HTML**: Simple EDS authoring structure with rows/cells containing the content (text, images via data-img-ref="N")
+2. **JS**: decorate(block) that reads the simple structure and builds the rendered DOM matching the screenshot
+3. **CSS**: Styles targeting the rendered DOM structure that decorate() creates
 
 ## Return Format
 
@@ -3056,7 +3065,8 @@ function handleBlockTestUI(env: Env): Response {
     \${jsCode}
     // Auto-run decorate if it exists (EDS blocks export a decorate function)
     if (typeof decorate === 'function') {
-      const block = document.querySelector('.block');
+      // Find the block element - it's the first div child of body (EDS blocks don't have .block class)
+      const block = document.querySelector('body > div');
       if (block) {
         try {
           decorate(block);
