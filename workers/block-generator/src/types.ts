@@ -206,6 +206,7 @@ export interface GitHubConfig {
   owner: string;
   repo: string;
   token?: string; // Optional - uses GITHUB_TOKEN from env if not provided
+  branch?: string; // Optional - defaults to 'main'
 }
 
 /** DA configuration for block generation */
@@ -298,4 +299,158 @@ export interface BlockCleanupResponse {
   success: true;
   branchesDeleted: string[];
   pagesDeleted: string[];
+}
+
+// =============================================================================
+// Design System Import Types
+// =============================================================================
+
+/** Request to import a design system from an external website */
+export interface DesignSystemImportRequest {
+  /** Source website URL (homepage recommended) */
+  url: string;
+  /** GitHub configuration for persisting styles */
+  github: GitHubConfig;
+  /** If true, extract design but don't push to GitHub (for testing) */
+  dryRun?: boolean;
+  /** Session ID for branch naming (e.g., "ds-abc123") */
+  sessionId?: string;
+  /** If true, generate sample content page and push to DA for preview */
+  generatePreview?: boolean;
+  /** DA configuration (required if generatePreview is true) */
+  da?: DAConfig;
+}
+
+/** Extracted color palette */
+export interface ExtractedColors {
+  background: string;
+  text: string;
+  link: string;
+  linkHover: string;
+  primary: string;
+  secondary: string;
+  light: string;
+  dark: string;
+}
+
+/** Extracted typography settings */
+export interface ExtractedTypography {
+  bodyFont: string;
+  headingFont: string;
+  bodySizes: {
+    m: string;
+    s: string;
+    xs: string;
+  };
+  headingSizes: {
+    xxl: string;
+    xl: string;
+    l: string;
+    m: string;
+    s: string;
+    xs: string;
+  };
+  lineHeight: string;
+  headingFontWeight?: string;
+}
+
+/** Extracted button styles */
+export interface ExtractedButtonStyles {
+  borderRadius: string;
+  padding: string;
+  primary: {
+    background: string;
+    color: string;
+    hoverBackground: string;
+  };
+  secondary: {
+    background: string;
+    color: string;
+    border: string;
+  };
+  linkButton?: {
+    color: string;
+    hoverColor: string;
+  };
+}
+
+/** Extracted layout settings */
+export interface ExtractedLayout {
+  maxWidth: string;
+  navHeight: string;
+  sectionPadding: string;
+}
+
+/** Downloaded font information */
+export interface DownloadedFont {
+  family: string;
+  weight: number;
+  style: string;
+  sourceUrl: string;
+  localPath: string;
+  format: string;
+}
+
+/** Complete extracted design system */
+export interface ExtractedDesign {
+  colors: ExtractedColors;
+  typography: ExtractedTypography;
+  buttons: ExtractedButtonStyles;
+  layout: ExtractedLayout;
+  fonts: DownloadedFont[];
+}
+
+/** Response from design system import */
+export interface DesignSystemImportResponse {
+  success: true;
+  /** Extracted design tokens */
+  extractedDesign: ExtractedDesign;
+  /** Generated files */
+  files: {
+    stylesCSS: string;
+    fontsCSS: string;
+    fontFiles: string[];
+  };
+  /** GitHub commit info */
+  github: {
+    commitSha: string;
+    commitUrl: string;
+    branch: string;
+    filesCommitted: string[];
+  };
+  /** Preview info (only if generatePreview was true) */
+  preview?: {
+    previewUrl: string;
+    daPath: string;
+    sampleHtml: string;
+  };
+}
+
+/** Computed styles extracted from browser */
+export interface ComputedDesign {
+  body: Record<string, string>;
+  headings: Record<string, Record<string, string>>;
+  link: Record<string, string>;
+  buttons: {
+    primary: Record<string, string> | null;
+    secondary: Record<string, string> | null;
+    linkButton: Record<string, string> | null;
+  };
+  container: Record<string, string>;
+  nav: Record<string, string>;
+}
+
+/** Parsed CSS data */
+export interface ParsedCSS {
+  rootVars: Record<string, string>;
+  fontFaces: Array<{
+    family: string;
+    src: string;
+    weight: number;
+    style: string;
+    /** Format of the font (woff2, woff, truetype, etc.) */
+    format?: string;
+    /** If the font was embedded as a data URI, this contains the Base64 data */
+    base64Data?: string;
+  }>;
 }

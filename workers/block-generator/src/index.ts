@@ -17,7 +17,21 @@ import {
   BlockCleanupResponse,
   GitHubConfig,
   DAConfig,
+  DesignSystemImportRequest,
+  DesignSystemImportResponse,
 } from './types';
+import {
+  extractComputedStyles as extractDesignComputedStyles,
+  parseStylesheets,
+  downloadFonts,
+  analyzeDesignWithClaude,
+  mergeExtractedDesign,
+  generateStylesCSS,
+  generateStyleGuideCSS,
+  generateFontsCSS,
+  generateFallbackFonts,
+} from './design-system-extractor';
+import { generateStyleGuideHTML } from './style-guide-template';
 import { fetchPage } from './fetcher';
 import { parseHTMLDocument, getElement } from './parser';
 import { extractContent } from './content-extractor';
@@ -336,6 +350,11 @@ export default {
 
     if (url.pathname === '/session-id' && request.method === 'GET') {
       return Response.json({ sessionId: generateSessionId() }, { headers: corsHeaders(env) });
+    }
+
+    // Design System Import endpoint
+    if (url.pathname === '/design-system-import' && request.method === 'POST') {
+      return handleDesignSystemImport(request, env);
     }
 
     // Debug endpoint to check config
@@ -2467,6 +2486,53 @@ function handleBlockTestUI(env: Env): Response {
     button.save-da:hover {
       background: #c40d00;
     }
+    button.design-system {
+      background: #9c27b0;
+    }
+    button.design-system:hover {
+      background: #7b1fa2;
+    }
+    .design-section {
+      margin-bottom: 16px;
+      padding: 12px;
+      background: #f8f5ff;
+      border-radius: 6px;
+    }
+    .design-section h4 {
+      font-size: 12px;
+      color: #9c27b0;
+      margin-bottom: 8px;
+      text-transform: uppercase;
+    }
+    .design-row {
+      display: flex;
+      justify-content: space-between;
+      padding: 4px 0;
+      font-size: 13px;
+    }
+    .design-label { color: #666; }
+    .design-value { font-family: monospace; color: #333; }
+    .color-swatches {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 6px;
+    }
+    .swatch-item {
+      display: flex;
+      align-items: center;
+      gap: 4px;
+      padding: 3px 6px;
+      background: white;
+      border: 1px solid #ddd;
+      border-radius: 4px;
+      font-size: 11px;
+    }
+    .swatch {
+      width: 16px;
+      height: 16px;
+      border-radius: 3px;
+      border: 1px solid rgba(0,0,0,0.1);
+    }
     .save-modal {
       display: none;
       position: fixed;
@@ -2831,46 +2897,34 @@ function handleBlockTestUI(env: Env): Response {
       <div class="panel">
         <h2>Input</h2>
         <div class="form-group">
+          <label for="cfg-gh-url">GitHub Repository URL</label>
+          <input type="text" id="cfg-gh-url" placeholder="https://github.com/owner/repo" required>
+          <div style="margin-top: 6px; font-size: 11px; color: #888;">
+            Session: <span id="sessionIdDisplay">Not started</span> · GitHub token configured in backend
+          </div>
+        </div>
+        <div class="form-group">
           <label for="url">Page URL</label>
-          <input type="url" id="url" placeholder="https://example.com/page">
+          <input type="url" id="url" placeholder="https://example.com/page" required>
         </div>
         <div class="form-group">
           <label for="screenshot">Screenshot (PNG)</label>
-          <input type="file" id="screenshot" accept="image/png">
+          <input type="file" id="screenshot" accept="image/png" required>
         </div>
         <div class="form-group">
-          <label for="xpath">Element XPath (optional - alternative to HTML)</label>
-          <input type="text" id="xpath" placeholder="/html/body/div[1]/section[2]">
-        </div>
-        <div class="form-group">
-          <label for="html">Element HTML (optional if XPath provided)</label>
-          <textarea id="html" placeholder="<div class='block'>...</div>"></textarea>
+          <label for="xpath">Element XPath</label>
+          <input type="text" id="xpath" placeholder="/html/body/div[1]/section[2]" required>
         </div>
         <div class="form-group">
           <label for="refinePrompt">Refine Instructions (optional)</label>
           <textarea id="refinePrompt" placeholder="E.g., 'Fix the background gradient - it should be darker' or 'The button should be rounded with more padding'" style="min-height: 60px;"></textarea>
         </div>
 
-        <details style="margin-bottom: 15px; background: #f8f9fa; padding: 12px; border-radius: 6px;">
-          <summary style="cursor: pointer; font-weight: 500; color: #555;">EDS Preview Configuration</summary>
-          <div style="margin-top: 12px;">
-            <div class="form-group" style="margin-bottom: 10px;">
-              <label for="cfg-gh-url">GitHub Repository URL</label>
-              <input type="text" id="cfg-gh-url" placeholder="https://github.com/owner/repo">
-            </div>
-            <div style="margin-top: 10px; font-size: 11px; color: #888;">
-              Session: <span id="sessionIdDisplay">Not started</span>
-              <br>GitHub token configured in backend
-            </div>
-          </div>
-        </details>
-
         <div class="button-group">
           <button id="generateBtn" onclick="generate()">Generate Block</button>
           <button id="refineBtn" class="refine" onclick="refine()" disabled>Refine</button>
           <button id="winnerBtn" class="winner" onclick="pickWinner()" disabled>Pick Winner</button>
-          <button id="saveGithubBtn" class="save-github" onclick="openGithubModal()" disabled>Save to GitHub</button>
-          <button id="saveDaBtn" class="save-da" onclick="openDaModal()" disabled>Save to DA</button>
+          <button id="designSystemBtn" class="design-system" onclick="importDesignSystem()">Import Design System</button>
           <span class="iteration-count" id="iterationCount"></span>
         </div>
         <div id="status" class="status" style="display: none;"></div>
@@ -2910,6 +2964,7 @@ function handleBlockTestUI(env: Env): Response {
           <div class="tab active" onclick="switchTab('html')">HTML</div>
           <div class="tab" onclick="switchTab('css')">CSS</div>
           <div class="tab" onclick="switchTab('js')">JS</div>
+          <div class="tab" onclick="switchTab('designSystem')" id="designSystemTab" style="margin-left: auto; border-left: 1px solid #ddd; padding-left: 20px;">Design System</div>
         </div>
         <div id="htmlTab" class="tab-content active">
           <pre id="generatedHtml">No block generated yet</pre>
@@ -2919,6 +2974,50 @@ function handleBlockTestUI(env: Env): Response {
         </div>
         <div id="jsTab" class="tab-content">
           <pre id="generatedJs">No block generated yet</pre>
+        </div>
+        <div id="designSystemTabContent" class="tab-content">
+          <div id="designSystemEmpty" style="color: #888; padding: 40px; text-align: center;">
+            Click "Import Design System" to extract design tokens from the Page URL
+          </div>
+          <div id="designSystemResults" style="display: none;">
+            <div id="designSystemCommit" style="margin-bottom: 15px; padding: 10px; background: #e8f5e9; border-radius: 4px; font-size: 13px;"></div>
+            <div class="tabs" id="designSubTabs">
+              <div class="tab active" onclick="switchDesignSubTab('tokens')">Tokens</div>
+              <div class="tab" onclick="switchDesignSubTab('stylesCSS')">styles.css</div>
+              <div class="tab" onclick="switchDesignSubTab('fontsCSS')">fonts.css</div>
+              <div class="tab" onclick="switchDesignSubTab('preview')" style="margin-left: auto; background: #9c27b0; color: white;">Preview</div>
+            </div>
+            <div id="tokensSubTab" class="tab-content active">
+              <div id="designTokens"></div>
+            </div>
+            <div id="stylesCSSSubTab" class="tab-content">
+              <pre id="designStylesCSS"></pre>
+            </div>
+            <div id="fontsCSSSubTab" class="tab-content">
+              <pre id="designFontsCSS"></pre>
+            </div>
+            <div id="previewSubTab" class="tab-content">
+              <div id="designPreviewLoading" style="color: #888; padding: 40px; text-align: center;">
+                Loading preview...
+              </div>
+              <div id="designPreviewContainer" style="display: none;">
+                <div style="margin-bottom: 10px; padding: 8px; background: #f3e5f5; border-radius: 4px; font-size: 13px;">
+                  <a id="designPreviewUrl" href="#" target="_blank" style="color: #7b1fa2;">Open preview in new tab →</a>
+                </div>
+                <div class="viewport-controls" style="margin-bottom: 10px;">
+                  <label>Viewport:</label>
+                  <button class="viewport-btn active" onclick="setDesignViewport(1440)" data-width="1440">Desktop</button>
+                  <button class="viewport-btn" onclick="setDesignViewport(768)" data-width="768">Tablet</button>
+                  <button class="viewport-btn" onclick="setDesignViewport(375)" data-width="375">Mobile</button>
+                </div>
+                <div style="border: 1px solid #ddd; border-radius: 4px; overflow: hidden; background: #f5f5f5;">
+                  <div id="designPreviewWrapper" style="width: 100%; height: 600px; margin: 0 auto; transition: width 0.3s; overflow: auto;">
+                    <iframe id="designPreviewFrame" style="width: 100%; height: 100%; border: none; background: white;" sandbox="allow-scripts allow-same-origin"></iframe>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
         </div>
 
         <div id="imagesRow" class="images-row" style="display: none;">
@@ -2948,62 +3047,6 @@ function handleBlockTestUI(env: Env): Response {
             </div>
           </div>
         </div>
-      </div>
-    </div>
-  </div>
-
-  <!-- GitHub Save Modal -->
-  <div id="githubModal" class="save-modal" onclick="if(event.target===this)closeModals()">
-    <div class="save-modal-content">
-      <h3>🐙 Save to GitHub</h3>
-      <div class="row">
-        <div class="form-group">
-          <label>Owner</label>
-          <input type="text" id="gh-owner" value="paolomoz">
-        </div>
-        <div class="form-group">
-          <label>Repo</label>
-          <input type="text" id="gh-repo" value="neocat-2">
-        </div>
-      </div>
-      <div class="form-group">
-        <label>Site URL (for branch name)</label>
-        <input type="text" id="gh-siteUrl" placeholder="https://www.example.com">
-      </div>
-      <div class="form-group">
-        <label>GitHub Token</label>
-        <input type="password" id="gh-token" placeholder="ghp_...">
-      </div>
-      <div id="gh-result" class="save-result"></div>
-      <div class="button-row">
-        <button class="cancel" onclick="closeModals()">Cancel</button>
-        <button class="save-github" onclick="saveToGithub()">Push to GitHub</button>
-      </div>
-    </div>
-  </div>
-
-  <!-- DA Save Modal -->
-  <div id="daModal" class="save-modal" onclick="if(event.target===this)closeModals()">
-    <div class="save-modal-content">
-      <h3>📄 Save to DA</h3>
-      <div class="row">
-        <div class="form-group">
-          <label>Organization</label>
-          <input type="text" id="da-org" value="paolomoz">
-        </div>
-        <div class="form-group">
-          <label>Site</label>
-          <input type="text" id="da-site" value="neocat-2">
-        </div>
-      </div>
-      <div class="form-group">
-        <label>Path</label>
-        <input type="text" id="da-path" value="/drafts/generated-block">
-      </div>
-      <div id="da-result" class="save-result"></div>
-      <div class="button-row">
-        <button class="cancel" onclick="closeModals()">Cancel</button>
-        <button class="save-da" onclick="saveToDa()">Save to DA</button>
       </div>
     </div>
   </div>
@@ -3115,10 +3158,179 @@ function handleBlockTestUI(env: Env): Response {
     }
 
     function switchTab(tab) {
-      document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
-      document.querySelectorAll('.tab-content').forEach(t => t.classList.remove('active'));
-      document.querySelector('.tab:nth-child(' + (tab === 'html' ? 1 : tab === 'css' ? 2 : 3) + ')').classList.add('active');
-      document.getElementById(tab + 'Tab').classList.add('active');
+      // Clear all tabs in main tab bar
+      document.querySelectorAll('.panel.wide > .tabs > .tab').forEach(t => t.classList.remove('active'));
+      document.querySelectorAll('.panel.wide > .tab-content').forEach(t => t.classList.remove('active'));
+
+      if (tab === 'designSystem') {
+        document.getElementById('designSystemTab').classList.add('active');
+        document.getElementById('designSystemTabContent').classList.add('active');
+      } else {
+        const tabIndex = tab === 'html' ? 1 : tab === 'css' ? 2 : 3;
+        document.querySelector('.panel.wide > .tabs > .tab:nth-child(' + tabIndex + ')').classList.add('active');
+        document.getElementById(tab + 'Tab').classList.add('active');
+      }
+    }
+
+    function switchDesignSubTab(tab) {
+      document.querySelectorAll('#designSubTabs .tab').forEach(t => t.classList.remove('active'));
+      document.querySelectorAll('#designSystemResults > .tab-content').forEach(t => t.classList.remove('active'));
+      const tabIndex = tab === 'tokens' ? 1 : tab === 'stylesCSS' ? 2 : tab === 'fontsCSS' ? 3 : 4;
+      document.querySelector('#designSubTabs .tab:nth-child(' + tabIndex + ')').classList.add('active');
+      document.getElementById(tab + 'SubTab').classList.add('active');
+    }
+
+    function setDesignViewport(width) {
+      const wrapper = document.getElementById('designPreviewWrapper');
+      wrapper.style.width = width + 'px';
+      document.querySelectorAll('#previewSubTab .viewport-btn').forEach(btn => {
+        btn.classList.remove('active');
+        if (parseInt(btn.dataset.width) === width) {
+          btn.classList.add('active');
+        }
+      });
+    }
+
+    // Store design preview info
+    let designPreviewUrl = null;
+    let designPreviewSessionId = null;
+
+    async function importDesignSystem() {
+      const pageUrl = document.getElementById('url').value;
+      const ghUrl = document.getElementById('cfg-gh-url').value;
+
+      if (!pageUrl) {
+        setStatus('Page URL is required for design system import', 'error');
+        return;
+      }
+
+      const ghParsed = parseGitHubUrl(ghUrl);
+
+      if (!ghParsed) {
+        setStatus('GitHub Repository URL is required for design system import with preview', 'error');
+        return;
+      }
+
+      const btn = document.getElementById('designSystemBtn');
+      btn.disabled = true;
+      btn.textContent = 'Importing...';
+      setStatus('Extracting design system... This may take 15-30 seconds.', 'loading');
+
+      // Generate session ID for this import
+      designPreviewSessionId = 'ds-' + Math.random().toString(36).substring(2, 8);
+
+      try {
+        // Step 1: Import design system with preview generation
+        const body = {
+          url: pageUrl,
+          github: ghParsed,
+          sessionId: designPreviewSessionId,
+          generatePreview: true  // Request preview generation
+        };
+
+        const res = await fetch('/design-system-import', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(body)
+        });
+
+        const data = await res.json();
+
+        if (!data.success) {
+          throw new Error(data.error);
+        }
+
+        // Show results
+        document.getElementById('designSystemEmpty').style.display = 'none';
+        document.getElementById('designSystemResults').style.display = 'block';
+
+        // Commit link
+        const commitDiv = document.getElementById('designSystemCommit');
+        if (data.github?.commitUrl) {
+          commitDiv.innerHTML = '<a href="' + data.github.commitUrl + '" target="_blank" style="color: #2e7d32;">View GitHub Commit →</a> (branch: ' + data.github.branch + ')';
+          commitDiv.style.display = 'block';
+        }
+
+        // Render tokens
+        renderDesignTokens(data.extractedDesign);
+        document.getElementById('designStylesCSS').textContent = data.files?.stylesCSS || '';
+        document.getElementById('designFontsCSS').textContent = data.files?.fontsCSS || '';
+
+        // Setup preview if available
+        if (data.preview?.previewUrl) {
+          designPreviewUrl = data.preview.previewUrl;
+          document.getElementById('designPreviewUrl').href = designPreviewUrl;
+          document.getElementById('designPreviewUrl').textContent = 'Open preview: ' + designPreviewUrl + ' →';
+          document.getElementById('designPreviewLoading').style.display = 'none';
+          document.getElementById('designPreviewContainer').style.display = 'block';
+
+          // Load preview with delay for CDN propagation
+          setTimeout(() => {
+            document.getElementById('designPreviewFrame').src = designPreviewUrl;
+          }, 3000);
+        } else {
+          document.getElementById('designPreviewLoading').textContent = 'Preview not available (no DA config)';
+        }
+
+        // Switch to design system tab
+        switchTab('designSystem');
+        setStatus('Design system extracted successfully!', 'success');
+
+      } catch (err) {
+        setStatus('Design system import failed: ' + err.message, 'error');
+      }
+
+      btn.disabled = false;
+      btn.textContent = 'Import Design System';
+    }
+
+    function renderDesignTokens(design) {
+      if (!design) return;
+      let html = '';
+
+      if (design.colors) {
+        html += '<div class="design-section"><h4>Colors</h4><div class="color-swatches">';
+        for (const [name, value] of Object.entries(design.colors)) {
+          html += '<div class="swatch-item"><div class="swatch" style="background:' + value + '"></div>' + name + '</div>';
+        }
+        html += '</div></div>';
+      }
+
+      if (design.typography) {
+        html += '<div class="design-section"><h4>Typography</h4>';
+        html += '<div class="design-row"><span class="design-label">Body Font</span><span class="design-value">' + design.typography.bodyFont + '</span></div>';
+        html += '<div class="design-row"><span class="design-label">Heading Font</span><span class="design-value">' + design.typography.headingFont + '</span></div>';
+        html += '<div class="design-row"><span class="design-label">Line Height</span><span class="design-value">' + design.typography.lineHeight + '</span></div>';
+        html += '</div>';
+      }
+
+      if (design.buttons) {
+        html += '<div class="design-section"><h4>Buttons</h4>';
+        html += '<div class="design-row"><span class="design-label">Border Radius</span><span class="design-value">' + design.buttons.borderRadius + '</span></div>';
+        html += '<div class="design-row"><span class="design-label">Padding</span><span class="design-value">' + design.buttons.padding + '</span></div>';
+        if (design.buttons.primary) {
+          html += '<div class="design-row"><span class="design-label">Primary BG</span><span class="design-value">' + design.buttons.primary.background + '</span></div>';
+        }
+        html += '</div>';
+      }
+
+      if (design.layout) {
+        html += '<div class="design-section"><h4>Layout</h4>';
+        html += '<div class="design-row"><span class="design-label">Max Width</span><span class="design-value">' + design.layout.maxWidth + '</span></div>';
+        html += '<div class="design-row"><span class="design-label">Nav Height</span><span class="design-value">' + design.layout.navHeight + '</span></div>';
+        html += '<div class="design-row"><span class="design-label">Section Padding</span><span class="design-value">' + design.layout.sectionPadding + '</span></div>';
+        html += '</div>';
+      }
+
+      if (design.fonts && design.fonts.length > 0) {
+        html += '<div class="design-section"><h4>Fonts (' + design.fonts.length + ')</h4>';
+        design.fonts.forEach(f => {
+          html += '<div class="design-row"><span class="design-label">' + f.family + ' (' + f.weight + ')</span><span class="design-value">' + f.localPath + '</span></div>';
+        });
+        html += '</div>';
+      }
+
+      document.getElementById('designTokens').innerHTML = html || '<p style="color:#888;">No tokens extracted</p>';
     }
 
     function switchOption(index) {
@@ -3179,8 +3391,6 @@ function handleBlockTestUI(env: Env): Response {
         document.getElementById('generatedJs').textContent = block.js;
         document.getElementById('iterationCount').textContent = 'Option ' + (activeOption + 1) + ' / v' + (activeIteration + 1);
         document.getElementById('refineBtn').disabled = isGenerating;
-        document.getElementById('saveGithubBtn').disabled = false;
-        document.getElementById('saveDaBtn').disabled = false;
 
         // Show EDS preview URL if available
         if (block.previewUrl) {
@@ -3196,16 +3406,12 @@ function handleBlockTestUI(env: Env): Response {
         document.getElementById('generatedCss').textContent = '';
         document.getElementById('generatedJs').textContent = '';
         document.getElementById('refineBtn').disabled = true;
-        document.getElementById('saveGithubBtn').disabled = true;
-        document.getElementById('saveDaBtn').disabled = true;
         previewBar.style.display = 'none';
       } else {
         document.getElementById('generatedHtml').textContent = 'No block generated yet';
         document.getElementById('generatedCss').textContent = '';
         document.getElementById('generatedJs').textContent = '';
         document.getElementById('refineBtn').disabled = true;
-        document.getElementById('saveGithubBtn').disabled = true;
-        document.getElementById('saveDaBtn').disabled = true;
         previewBar.style.display = 'none';
       }
     }
@@ -3286,13 +3492,18 @@ function handleBlockTestUI(env: Env): Response {
     }
 
     async function generate() {
+      const ghUrl = document.getElementById('cfg-gh-url').value;
       const url = document.getElementById('url').value;
       const screenshot = document.getElementById('screenshot').files[0];
-      const html = document.getElementById('html').value;
       const xpath = document.getElementById('xpath').value;
 
-      if (!url || !screenshot || (!html && !xpath)) {
-        setStatus('Please provide URL, screenshot, and either HTML or XPath', 'error');
+      if (!ghUrl || !url || !screenshot || !xpath) {
+        setStatus('Please fill in all required fields: GitHub URL, Page URL, Screenshot, and XPath', 'error');
+        return;
+      }
+
+      if (!parseGitHubUrl(ghUrl)) {
+        setStatus('Invalid GitHub URL format. Use: https://github.com/owner/repo', 'error');
         return;
       }
 
@@ -3341,8 +3552,7 @@ function handleBlockTestUI(env: Env): Response {
         const formData = new FormData();
         formData.append('url', url);
         formData.append('screenshot', screenshot);
-        if (html) formData.append('html', html);
-        if (xpath) formData.append('xpath', xpath);
+        formData.append('xpath', xpath);
 
         const response = await fetch('/block-generate', { method: 'POST', body: formData });
         const responseText = await response.text();
@@ -3366,8 +3576,7 @@ function handleBlockTestUI(env: Env): Response {
         const formData = new FormData();
         formData.append('url', url);
         formData.append('screenshot', originalScreenshot);
-        if (html) formData.append('html', html);
-        if (xpath) formData.append('xpath', xpath);
+        formData.append('xpath', xpath);
         formData.append('blockHtml', prevBlock.html);
         formData.append('blockCss', prevBlock.css);
         formData.append('blockJs', prevBlock.js);
@@ -3521,8 +3730,7 @@ function handleBlockTestUI(env: Env): Response {
         const formData = new FormData();
         formData.append('url', url);
         formData.append('screenshot', originalScreenshot);
-        if (html) formData.append('html', html);
-        if (xpath) formData.append('xpath', xpath);
+        formData.append('xpath', xpath);
         if (refinePrompt) formData.append('prompt', refinePrompt);
         formData.append('blockHtml', currentBlock.html);
         formData.append('blockCss', currentBlock.css);
@@ -3766,121 +3974,6 @@ function handleBlockTestUI(env: Env): Response {
       }
     }
 
-    function closeModals() {
-      document.getElementById('githubModal').classList.remove('active');
-      document.getElementById('daModal').classList.remove('active');
-      document.getElementById('gh-result').className = 'save-result';
-      document.getElementById('da-result').className = 'save-result';
-    }
-
-    function openGithubModal() {
-      const currentBlock = blocks[activeOption][activeIteration];
-      if (!currentBlock || currentBlock.loading) return;
-
-      // Pre-fill site URL from input
-      const siteUrl = document.getElementById('url').value;
-      if (siteUrl) document.getElementById('gh-siteUrl').value = siteUrl;
-
-      document.getElementById('gh-result').className = 'save-result';
-      document.getElementById('githubModal').classList.add('active');
-    }
-
-    function openDaModal() {
-      const currentBlock = blocks[activeOption][activeIteration];
-      if (!currentBlock || currentBlock.loading) return;
-
-      // Pre-fill path with block name
-      const blockName = currentBlock.blockName || 'generated-block';
-      document.getElementById('da-path').value = '/drafts/' + blockName;
-
-      document.getElementById('da-result').className = 'save-result';
-      document.getElementById('daModal').classList.add('active');
-    }
-
-    async function saveToGithub() {
-      const currentBlock = blocks[activeOption][activeIteration];
-      if (!currentBlock || currentBlock.loading) return;
-
-      const result = document.getElementById('gh-result');
-      const btn = document.querySelector('#githubModal .save-github');
-      btn.disabled = true;
-      btn.textContent = 'Pushing...';
-
-      try {
-        const body = {
-          owner: document.getElementById('gh-owner').value,
-          repo: document.getElementById('gh-repo').value,
-          blockName: currentBlock.blockName || 'my-block',
-          js: currentBlock.js,
-          css: currentBlock.css,
-          token: document.getElementById('gh-token').value,
-        };
-
-        const siteUrl = document.getElementById('gh-siteUrl').value;
-        if (siteUrl) body.siteUrl = siteUrl;
-
-        const res = await fetch('/block-github', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify(body)
-        });
-
-        const data = await res.json();
-
-        if (data.success) {
-          result.className = 'save-result success';
-          result.innerHTML = 'Pushed to branch <strong>' + data.branch + '</strong>! <a href="' + data.commitUrl + '" target="_blank">View commit →</a>';
-        } else {
-          result.className = 'save-result error';
-          result.textContent = 'Error: ' + data.error;
-        }
-      } catch (err) {
-        result.className = 'save-result error';
-        result.textContent = 'Error: ' + err.message;
-      }
-
-      btn.disabled = false;
-      btn.textContent = 'Push to GitHub';
-    }
-
-    async function saveToDa() {
-      const currentBlock = blocks[activeOption][activeIteration];
-      if (!currentBlock || currentBlock.loading) return;
-
-      const result = document.getElementById('da-result');
-      const btn = document.querySelector('#daModal .save-da');
-      btn.disabled = true;
-      btn.textContent = 'Saving...';
-
-      try {
-        const res = await fetch('/block-da', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            org: document.getElementById('da-org').value,
-            site: document.getElementById('da-site').value,
-            path: document.getElementById('da-path').value,
-            html: currentBlock.html,
-          })
-        });
-
-        const data = await res.json();
-
-        if (data.success) {
-          result.className = 'save-result success';
-          result.innerHTML = 'Saved! <a href="' + data.pageUrl + '" target="_blank">Open in DA →</a> | <a href="' + data.previewUrl + '" target="_blank">Preview →</a>';
-        } else {
-          result.className = 'save-result error';
-          result.textContent = 'Error: ' + data.error;
-        }
-      } catch (err) {
-        result.className = 'save-result error';
-        result.textContent = 'Error: ' + err.message;
-      }
-
-      btn.disabled = false;
-      btn.textContent = 'Save to DA';
-    }
   </script>
 </body>
 </html>`;
@@ -4243,7 +4336,7 @@ function handleSaveTestUI(env: Env): Response {
 }
 
 /**
- * Returns the test UI HTML page
+ * Returns the test UI HTML page with block generation and design system import
  */
 function handleTestUI(env: Env): Response {
   const html = `<!DOCTYPE html>
@@ -4253,155 +4346,449 @@ function handleTestUI(env: Env): Response {
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>EDS Block Generator</title>
   <style>
-    * { box-sizing: border-box; }
+    * { box-sizing: border-box; margin: 0; padding: 0; }
     body {
       font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
-      max-width: 800px;
-      margin: 0 auto;
-      padding: 40px 20px;
-      background: #f5f5f5;
+      background: linear-gradient(135deg, #1a1a2e 0%, #16213e 100%);
+      min-height: 100vh;
+      padding: 20px;
+      color: #fff;
     }
-    h1 { margin: 0 0 8px; }
-    .subtitle { color: #666; margin: 0 0 32px; }
-    .form-group { margin-bottom: 20px; }
-    label { display: block; font-weight: 600; margin-bottom: 8px; }
-    input[type="text"] {
+    .container { max-width: 1400px; margin: 0 auto; }
+    h1 { margin-bottom: 8px; font-size: 28px; }
+    .subtitle { color: #888; margin-bottom: 24px; }
+    .main-layout { display: grid; grid-template-columns: 380px 1fr; gap: 20px; }
+    @media (max-width: 900px) { .main-layout { grid-template-columns: 1fr; } }
+    .panel {
+      background: rgba(255,255,255,0.05);
+      border: 1px solid rgba(255,255,255,0.1);
+      border-radius: 12px;
+      padding: 20px;
+    }
+    .panel h2 { font-size: 16px; margin-bottom: 16px; color: #aaa; }
+    .form-group { margin-bottom: 14px; }
+    label { display: block; font-weight: 500; margin-bottom: 6px; font-size: 13px; color: #aaa; }
+    input[type="text"], input[type="password"], input[type="url"] {
       width: 100%;
-      padding: 12px;
-      font-size: 16px;
-      border: 1px solid #ccc;
+      padding: 10px 12px;
+      font-size: 14px;
+      border: 1px solid rgba(255,255,255,0.15);
       border-radius: 6px;
+      background: rgba(0,0,0,0.3);
+      color: #fff;
     }
-    input[type="text"]:focus {
+    input:focus {
       outline: none;
       border-color: #3b63fb;
-      box-shadow: 0 0 0 3px rgba(59, 99, 251, 0.1);
     }
-    .buttons { display: flex; gap: 12px; margin-top: 24px; }
+    .hint { font-size: 11px; color: #666; margin-top: 4px; }
+    .section-divider {
+      border-top: 1px solid rgba(255,255,255,0.1);
+      margin: 20px 0 16px;
+      padding-top: 16px;
+    }
+    .section-title { font-size: 13px; color: #888; margin-bottom: 12px; text-transform: uppercase; letter-spacing: 0.5px; }
+    .row { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+    .checkbox-group { display: flex; align-items: center; gap: 8px; margin-top: 4px; }
+    .checkbox-group input { width: 16px; height: 16px; cursor: pointer; }
+    .checkbox-group label { margin: 0; cursor: pointer; color: #ccc; font-size: 13px; }
+    .buttons { display: flex; flex-direction: column; gap: 10px; margin-top: 20px; }
     button {
-      padding: 12px 24px;
-      font-size: 16px;
+      padding: 12px 20px;
+      font-size: 14px;
       font-weight: 600;
       border: none;
       border-radius: 6px;
       cursor: pointer;
-      transition: background-color 0.2s;
+      transition: all 0.2s;
+      width: 100%;
     }
-    .btn-primary {
-      background: #3b63fb;
-      color: white;
-    }
+    button:hover { transform: translateY(-1px); }
+    button:disabled { opacity: 0.5; cursor: not-allowed; transform: none; }
+    .btn-primary { background: #3b63fb; color: white; }
     .btn-primary:hover { background: #1d3ecf; }
-    .btn-secondary {
-      background: #e0e0e0;
-      color: #333;
-    }
-    .btn-secondary:hover { background: #d0d0d0; }
-    .hint {
-      font-size: 13px;
-      color: #888;
-      margin-top: 6px;
-    }
-    .loading {
-      display: none;
-      color: #666;
-      margin-top: 20px;
-    }
-    .error {
-      background: #fee;
-      border: 1px solid #fcc;
-      color: #c00;
-      padding: 12px;
+    .btn-secondary { background: rgba(255,255,255,0.1); color: #ccc; border: 1px solid rgba(255,255,255,0.2); }
+    .btn-secondary:hover { background: rgba(255,255,255,0.15); }
+    .btn-design { background: linear-gradient(135deg, #9c27b0 0%, #7b1fa2 100%); color: white; }
+    .btn-design:hover { background: linear-gradient(135deg, #7b1fa2 0%, #6a1b9a 100%); }
+    .btn-row { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+    .status {
+      margin-top: 12px;
+      padding: 10px;
       border-radius: 6px;
-      margin-top: 20px;
+      font-size: 13px;
       display: none;
     }
+    .status.loading { display: block; background: rgba(59,99,251,0.2); border: 1px solid #3b63fb; }
+    .status.error { display: block; background: rgba(244,67,54,0.2); border: 1px solid #f44336; }
+    .status.success { display: block; background: rgba(76,175,80,0.2); border: 1px solid #4CAF50; }
+    /* Right panel */
+    .results-panel { max-height: calc(100vh - 100px); overflow-y: auto; }
+    .tabs { display: flex; gap: 8px; margin-bottom: 16px; }
+    .tab {
+      padding: 8px 16px;
+      background: rgba(255,255,255,0.1);
+      border: 1px solid rgba(255,255,255,0.2);
+      border-radius: 6px;
+      color: #888;
+      font-size: 13px;
+      cursor: pointer;
+      width: auto;
+    }
+    .tab:hover { background: rgba(255,255,255,0.15); transform: none; }
+    .tab.active { background: rgba(59,99,251,0.3); border-color: #3b63fb; color: #fff; }
+    .tab.design-active { background: rgba(156,39,176,0.3); border-color: #9c27b0; }
+    .tab-content { display: none; }
+    .tab-content.active { display: block; }
+    .empty-state { text-align: center; padding: 60px 20px; color: #555; }
+    .empty-state .icon { font-size: 48px; margin-bottom: 16px; opacity: 0.5; }
+    pre {
+      background: rgba(0,0,0,0.4);
+      padding: 16px;
+      border-radius: 8px;
+      overflow-x: auto;
+      font-size: 12px;
+      line-height: 1.5;
+      white-space: pre-wrap;
+      word-break: break-word;
+      color: #ccc;
+    }
+    .design-section { margin-bottom: 20px; padding: 14px; background: rgba(0,0,0,0.2); border-radius: 8px; }
+    .design-section h3 { font-size: 12px; color: #9c27b0; margin-bottom: 10px; text-transform: uppercase; letter-spacing: 1px; }
+    .color-swatches { display: flex; flex-wrap: wrap; gap: 6px; }
+    .swatch-item { display: flex; align-items: center; gap: 6px; padding: 4px 8px; background: rgba(0,0,0,0.3); border-radius: 4px; font-size: 12px; }
+    .swatch { width: 20px; height: 20px; border-radius: 4px; border: 1px solid rgba(255,255,255,0.2); }
+    .design-row { display: flex; justify-content: space-between; padding: 5px 0; border-bottom: 1px solid rgba(255,255,255,0.05); font-size: 13px; }
+    .design-row:last-child { border-bottom: none; }
+    .design-label { color: #888; }
+    .design-value { font-family: monospace; color: #fff; }
+    .design-tabs { display: flex; gap: 6px; margin-bottom: 12px; }
+    .design-tab { padding: 6px 12px; background: rgba(255,255,255,0.05); border: 1px solid rgba(255,255,255,0.1); border-radius: 4px; color: #888; font-size: 12px; cursor: pointer; width: auto; }
+    .design-tab:hover { background: rgba(255,255,255,0.1); transform: none; }
+    .design-tab.active { background: rgba(156,39,176,0.2); border-color: #9c27b0; color: #fff; }
+    .design-subtab { display: none; }
+    .design-subtab.active { display: block; }
+    .commit-link { margin-top: 12px; }
+    .commit-link a { color: #4CAF50; text-decoration: none; }
+    .commit-link a:hover { text-decoration: underline; }
   </style>
 </head>
 <body>
-  <h1>EDS Block Generator</h1>
-  <p class="subtitle">Generate AEM Edge Delivery Services blocks from any webpage</p>
+  <div class="container">
+    <h1>EDS Block Generator</h1>
+    <p class="subtitle">Generate blocks and import design systems from any webpage</p>
 
-  <form id="generateForm">
-    <div class="form-group">
-      <label for="url">Page URL</label>
-      <input type="text" id="url" name="url" placeholder="https://example.com" required>
-      <p class="hint">The webpage to extract content from</p>
+    <div class="main-layout">
+      <!-- Left Panel - Input Form -->
+      <div class="panel">
+        <h2>Configuration</h2>
+
+        <div class="form-group">
+          <label>Page URL</label>
+          <input type="url" id="url" placeholder="https://example.com" required>
+          <p class="hint">The webpage to extract from</p>
+        </div>
+
+        <div class="form-group">
+          <label>CSS Selector (for block generation)</label>
+          <input type="text" id="selector" placeholder=".hero, #main-content">
+          <p class="hint">CSS selector for block content</p>
+        </div>
+
+        <div class="btn-row">
+          <button type="button" class="btn-primary" id="previewBtn">Preview Block</button>
+          <button type="button" class="btn-secondary" id="jsonBtn">Get JSON</button>
+        </div>
+
+        <div class="section-divider">
+          <div class="section-title">GitHub Configuration</div>
+        </div>
+
+        <div class="row">
+          <div class="form-group">
+            <label>Owner</label>
+            <input type="text" id="gh-owner" value="paolomoz">
+          </div>
+          <div class="form-group">
+            <label>Repo</label>
+            <input type="text" id="gh-repo" value="neocat-2">
+          </div>
+        </div>
+
+        <div class="form-group">
+          <label>GitHub Token</label>
+          <input type="password" id="gh-token" placeholder="ghp_...">
+        </div>
+
+        <div class="form-group">
+          <div class="checkbox-group">
+            <input type="checkbox" id="dry-run" checked>
+            <label for="dry-run">Dry Run (don't push)</label>
+          </div>
+        </div>
+
+        <div class="buttons">
+          <button type="button" class="btn-design" id="importDesignBtn">Import Design System</button>
+        </div>
+
+        <div id="status" class="status"></div>
+      </div>
+
+      <!-- Right Panel - Results -->
+      <div class="panel results-panel">
+        <div class="tabs">
+          <button class="tab active" data-tab="block">Block Results</button>
+          <button class="tab" data-tab="design">Design System</button>
+        </div>
+
+        <div id="tab-block" class="tab-content active">
+          <div id="block-empty" class="empty-state">
+            <div class="icon">&#128230;</div>
+            <p>Enter a URL and selector, then click Preview or Get JSON</p>
+          </div>
+          <div id="block-results" style="display:none;">
+            <pre id="block-json"></pre>
+          </div>
+        </div>
+
+        <div id="tab-design" class="tab-content">
+          <div id="design-empty" class="empty-state">
+            <div class="icon">&#127912;</div>
+            <p>Enter a URL and click Import Design System</p>
+          </div>
+          <div id="design-results" style="display:none;">
+            <div id="design-commit" class="commit-link"></div>
+            <div class="design-tabs">
+              <button class="design-tab active" data-subtab="tokens">Tokens</button>
+              <button class="design-tab" data-subtab="styles">styles.css</button>
+              <button class="design-tab" data-subtab="fonts">fonts.css</button>
+              <button class="design-tab" data-subtab="json">JSON</button>
+            </div>
+            <div id="subtab-tokens" class="design-subtab active"></div>
+            <div id="subtab-styles" class="design-subtab"><pre id="styles-css"></pre></div>
+            <div id="subtab-fonts" class="design-subtab"><pre id="fonts-css"></pre></div>
+            <div id="subtab-json" class="design-subtab"><pre id="design-json"></pre></div>
+          </div>
+        </div>
+      </div>
     </div>
-
-    <div class="form-group">
-      <label for="selector">CSS Selector</label>
-      <input type="text" id="selector" name="selector" placeholder=".hero, #main-content, article" required>
-      <p class="hint">CSS selector for the content block to convert</p>
-    </div>
-
-    <div class="buttons">
-      <button type="submit" class="btn-primary" id="previewBtn">Preview in Browser</button>
-      <button type="button" class="btn-secondary" id="jsonBtn">Get JSON</button>
-    </div>
-  </form>
-
-  <p class="loading" id="loading">Generating block...</p>
-  <div class="error" id="error"></div>
+  </div>
 
   <script>
-    const form = document.getElementById('generateForm');
-    const loading = document.getElementById('loading');
-    const error = document.getElementById('error');
-
-    form.addEventListener('submit', async (e) => {
-      e.preventDefault();
-      await makeRequest('/preview', true);
+    // Load saved GitHub config
+    ['gh-owner', 'gh-repo', 'gh-token'].forEach(id => {
+      const saved = localStorage.getItem('eds-test-' + id);
+      if (saved) document.getElementById(id).value = saved;
     });
 
-    document.getElementById('jsonBtn').addEventListener('click', async () => {
-      await makeRequest('/generate', false);
+    // Save GitHub config on change
+    ['gh-owner', 'gh-repo', 'gh-token'].forEach(id => {
+      document.getElementById(id).addEventListener('change', (e) => {
+        localStorage.setItem('eds-test-' + id, e.target.value);
+      });
     });
 
-    async function makeRequest(endpoint, openInNewTab) {
+    // Tab switching
+    document.querySelectorAll('.tab').forEach(tab => {
+      tab.addEventListener('click', () => {
+        document.querySelectorAll('.tab').forEach(t => t.classList.remove('active', 'design-active'));
+        document.querySelectorAll('.tab-content').forEach(c => c.classList.remove('active'));
+        tab.classList.add('active');
+        if (tab.dataset.tab === 'design') tab.classList.add('design-active');
+        document.getElementById('tab-' + tab.dataset.tab).classList.add('active');
+      });
+    });
+
+    // Design subtab switching
+    document.querySelectorAll('.design-tab').forEach(tab => {
+      tab.addEventListener('click', () => {
+        document.querySelectorAll('.design-tab').forEach(t => t.classList.remove('active'));
+        document.querySelectorAll('.design-subtab').forEach(c => c.classList.remove('active'));
+        tab.classList.add('active');
+        document.getElementById('subtab-' + tab.dataset.subtab).classList.add('active');
+      });
+    });
+
+    const status = document.getElementById('status');
+
+    function showStatus(type, message) {
+      status.className = 'status ' + type;
+      status.innerHTML = message;
+    }
+
+    function hideStatus() {
+      status.className = 'status';
+      status.style.display = 'none';
+    }
+
+    // Block Preview
+    document.getElementById('previewBtn').addEventListener('click', async () => {
       const url = document.getElementById('url').value;
       const selector = document.getElementById('selector').value;
+      if (!url || !selector) { showStatus('error', 'URL and selector required'); return; }
 
-      loading.style.display = 'block';
-      error.style.display = 'none';
-
+      showStatus('loading', 'Generating preview...');
       try {
-        const response = await fetch(endpoint, {
+        const res = await fetch('/preview', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ url, selector })
         });
-
-        if (endpoint === '/preview') {
-          const html = await response.text();
-          if (!response.ok) {
-            throw new Error('Failed to generate preview');
-          }
-          const newWindow = window.open('', '_blank');
-          if (!newWindow) {
-            throw new Error('Popup blocked. Please allow popups for this site.');
-          }
-          newWindow.document.write(html);
-          newWindow.document.close();
-        } else {
-          const json = await response.json();
-          if (json.success) {
-            const newWindow = window.open('', '_blank');
-            if (!newWindow) {
-              throw new Error('Popup blocked. Please allow popups for this site.');
-            }
-            newWindow.document.write('<pre>' + JSON.stringify(json, null, 2) + '</pre>');
-            newWindow.document.close();
-          } else {
-            throw new Error(json.error);
-          }
-        }
+        const html = await res.text();
+        if (!res.ok) throw new Error('Failed to generate preview');
+        const win = window.open('', '_blank');
+        if (!win) throw new Error('Popup blocked');
+        win.document.write(html);
+        win.document.close();
+        hideStatus();
       } catch (err) {
-        error.textContent = err.message;
-        error.style.display = 'block';
-      } finally {
-        loading.style.display = 'none';
+        showStatus('error', err.message);
       }
+    });
+
+    // Block JSON
+    document.getElementById('jsonBtn').addEventListener('click', async () => {
+      const url = document.getElementById('url').value;
+      const selector = document.getElementById('selector').value;
+      if (!url || !selector) { showStatus('error', 'URL and selector required'); return; }
+
+      showStatus('loading', 'Generating JSON...');
+      try {
+        const res = await fetch('/generate', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ url, selector })
+        });
+        const json = await res.json();
+        if (!json.success) throw new Error(json.error);
+
+        document.getElementById('block-empty').style.display = 'none';
+        document.getElementById('block-results').style.display = 'block';
+        document.getElementById('block-json').textContent = JSON.stringify(json, null, 2);
+
+        // Switch to block tab
+        document.querySelectorAll('.tab').forEach(t => t.classList.remove('active', 'design-active'));
+        document.querySelectorAll('.tab-content').forEach(c => c.classList.remove('active'));
+        document.querySelector('[data-tab="block"]').classList.add('active');
+        document.getElementById('tab-block').classList.add('active');
+
+        hideStatus();
+      } catch (err) {
+        showStatus('error', err.message);
+      }
+    });
+
+    // Design System Import
+    document.getElementById('importDesignBtn').addEventListener('click', async () => {
+      const url = document.getElementById('url').value;
+      if (!url) { showStatus('error', 'URL required'); return; }
+
+      const btn = document.getElementById('importDesignBtn');
+      btn.disabled = true;
+      btn.textContent = 'Extracting...';
+      showStatus('loading', 'Extracting design system... This may take 15-30 seconds.');
+
+      try {
+        const body = {
+          url,
+          github: {
+            owner: document.getElementById('gh-owner').value,
+            repo: document.getElementById('gh-repo').value,
+          },
+          dryRun: document.getElementById('dry-run').checked,
+        };
+        const token = document.getElementById('gh-token').value;
+        if (token) body.github.token = token;
+
+        const res = await fetch('/design-system-import', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(body)
+        });
+
+        const data = await res.json();
+        if (!data.success) throw new Error(data.error);
+
+        // Show results
+        document.getElementById('design-empty').style.display = 'none';
+        document.getElementById('design-results').style.display = 'block';
+
+        // Commit link
+        const commitDiv = document.getElementById('design-commit');
+        if (data.github?.commitUrl) {
+          commitDiv.innerHTML = '<a href="' + data.github.commitUrl + '" target="_blank">View GitHub Commit &rarr;</a>';
+        } else {
+          commitDiv.innerHTML = '<span style="color:#888;">Dry run - not pushed to GitHub</span>';
+        }
+
+        // Render tokens
+        renderDesignTokens(data.extractedDesign);
+        document.getElementById('styles-css').textContent = data.files?.stylesCSS || '';
+        document.getElementById('fonts-css').textContent = data.files?.fontsCSS || '';
+        document.getElementById('design-json').textContent = JSON.stringify(data, null, 2);
+
+        // Switch to design tab
+        document.querySelectorAll('.tab').forEach(t => t.classList.remove('active', 'design-active'));
+        document.querySelectorAll('.tab-content').forEach(c => c.classList.remove('active'));
+        document.querySelector('[data-tab="design"]').classList.add('active', 'design-active');
+        document.getElementById('tab-design').classList.add('active');
+
+        showStatus('success', 'Design system extracted successfully!');
+      } catch (err) {
+        showStatus('error', err.message);
+      }
+
+      btn.disabled = false;
+      btn.textContent = 'Import Design System';
+    });
+
+    function renderDesignTokens(design) {
+      if (!design) return;
+      let html = '';
+
+      if (design.colors) {
+        html += '<div class="design-section"><h3>Colors</h3><div class="color-swatches">';
+        for (const [name, value] of Object.entries(design.colors)) {
+          html += '<div class="swatch-item"><div class="swatch" style="background:' + value + '"></div>' + name + ': ' + value + '</div>';
+        }
+        html += '</div></div>';
+      }
+
+      if (design.typography) {
+        html += '<div class="design-section"><h3>Typography</h3>';
+        html += '<div class="design-row"><span class="design-label">Body Font</span><span class="design-value">' + design.typography.bodyFont + '</span></div>';
+        html += '<div class="design-row"><span class="design-label">Heading Font</span><span class="design-value">' + design.typography.headingFont + '</span></div>';
+        html += '<div class="design-row"><span class="design-label">Line Height</span><span class="design-value">' + design.typography.lineHeight + '</span></div>';
+        html += '</div>';
+      }
+
+      if (design.buttons) {
+        html += '<div class="design-section"><h3>Buttons</h3>';
+        html += '<div class="design-row"><span class="design-label">Border Radius</span><span class="design-value">' + design.buttons.borderRadius + '</span></div>';
+        html += '<div class="design-row"><span class="design-label">Padding</span><span class="design-value">' + design.buttons.padding + '</span></div>';
+        if (design.buttons.primary) {
+          html += '<div class="design-row"><span class="design-label">Primary BG</span><span class="design-value">' + design.buttons.primary.background + '</span></div>';
+        }
+        html += '</div>';
+      }
+
+      if (design.layout) {
+        html += '<div class="design-section"><h3>Layout</h3>';
+        html += '<div class="design-row"><span class="design-label">Max Width</span><span class="design-value">' + design.layout.maxWidth + '</span></div>';
+        html += '<div class="design-row"><span class="design-label">Nav Height</span><span class="design-value">' + design.layout.navHeight + '</span></div>';
+        html += '<div class="design-row"><span class="design-label">Section Padding</span><span class="design-value">' + design.layout.sectionPadding + '</span></div>';
+        html += '</div>';
+      }
+
+      if (design.fonts && design.fonts.length > 0) {
+        html += '<div class="design-section"><h3>Fonts (' + design.fonts.length + ')</h3>';
+        design.fonts.forEach(f => {
+          html += '<div class="design-row"><span class="design-label">' + f.family + ' (' + f.weight + ')</span><span class="design-value">' + f.localPath + '</span></div>';
+        });
+        html += '</div>';
+      }
+
+      document.getElementById('subtab-tokens').innerHTML = html || '<p style="color:#888;">No tokens extracted</p>';
     }
   </script>
 </body>
@@ -6442,6 +6829,512 @@ function handleError(error: unknown, env: Env): Response {
     status: 500,
     headers: corsHeaders(env),
   });
+}
+
+// =============================================================================
+// Design System Import Handler
+// =============================================================================
+
+/**
+ * Push files to a branch, supporting both text and binary (base64) content
+ */
+async function pushFilesToBranchWithBinary(
+  githubFetch: (url: string, options?: RequestInit) => Promise<Response>,
+  owner: string,
+  repo: string,
+  branch: string,
+  files: Array<{ path: string; content: string; encoding?: 'utf-8' | 'base64' }>,
+  commitMessage: string
+): Promise<{ commitSha: string; commitUrl: string }> {
+  // Get current commit SHA (ensure branch exists, create from 'main' if not)
+  const currentCommitSha = await ensureBranchExists(githubFetch, owner, repo, branch, 'main');
+
+  // Get base tree SHA
+  const commitResponse = await githubFetch(
+    `https://api.github.com/repos/${owner}/${repo}/git/commits/${currentCommitSha}`
+  );
+
+  if (!commitResponse.ok) {
+    const error = await commitResponse.text();
+    throw new BlockGeneratorError(
+      `Failed to get commit: ${commitResponse.status} - ${error}`,
+      'GITHUB_API_ERROR',
+      commitResponse.status
+    );
+  }
+
+  const commitData = await commitResponse.json() as { tree: { sha: string } };
+  const baseTreeSha = commitData.tree.sha;
+
+  // Create blobs for all files (supporting binary/base64)
+  const createBlob = async (content: string, encoding: 'utf-8' | 'base64' = 'utf-8'): Promise<string> => {
+    const blobResponse = await githubFetch(
+      `https://api.github.com/repos/${owner}/${repo}/git/blobs`,
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ content, encoding }),
+      }
+    );
+
+    if (!blobResponse.ok) {
+      const error = await blobResponse.text();
+      throw new BlockGeneratorError(
+        `Failed to create blob: ${blobResponse.status} - ${error}`,
+        'GITHUB_API_ERROR',
+        blobResponse.status
+      );
+    }
+
+    const blobData = await blobResponse.json() as { sha: string };
+    return blobData.sha;
+  };
+
+  const blobShas = await Promise.all(
+    files.map(f => createBlob(f.content, f.encoding || 'utf-8'))
+  );
+
+  // Create new tree
+  const treeResponse = await githubFetch(
+    `https://api.github.com/repos/${owner}/${repo}/git/trees`,
+    {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        base_tree: baseTreeSha,
+        tree: files.map((f, i) => ({
+          path: f.path,
+          mode: '100644',
+          type: 'blob',
+          sha: blobShas[i],
+        })),
+      }),
+    }
+  );
+
+  if (!treeResponse.ok) {
+    const error = await treeResponse.text();
+    throw new BlockGeneratorError(
+      `Failed to create tree: ${treeResponse.status} - ${error}`,
+      'GITHUB_API_ERROR',
+      treeResponse.status
+    );
+  }
+
+  const treeData = await treeResponse.json() as { sha: string };
+
+  // Create commit
+  const newCommitResponse = await githubFetch(
+    `https://api.github.com/repos/${owner}/${repo}/git/commits`,
+    {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        message: commitMessage,
+        tree: treeData.sha,
+        parents: [currentCommitSha],
+      }),
+    }
+  );
+
+  if (!newCommitResponse.ok) {
+    const error = await newCommitResponse.text();
+    throw new BlockGeneratorError(
+      `Failed to create commit: ${newCommitResponse.status} - ${error}`,
+      'GITHUB_API_ERROR',
+      newCommitResponse.status
+    );
+  }
+
+  const newCommitData = await newCommitResponse.json() as { sha: string };
+
+  // Update branch ref
+  const updateRefResponse = await githubFetch(
+    `https://api.github.com/repos/${owner}/${repo}/git/refs/heads/${branch}`,
+    {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ sha: newCommitData.sha }),
+    }
+  );
+
+  if (!updateRefResponse.ok) {
+    const error = await updateRefResponse.text();
+    throw new BlockGeneratorError(
+      `Failed to update branch ref: ${updateRefResponse.status} - ${error}`,
+      'GITHUB_API_ERROR',
+      updateRefResponse.status
+    );
+  }
+
+  return {
+    commitSha: newCommitData.sha,
+    commitUrl: `https://github.com/${owner}/${repo}/commit/${newCommitData.sha}`,
+  };
+}
+
+/**
+ * Handles /design-system-import endpoint
+ * Extracts design system from an external website and pushes styles to GitHub
+ */
+async function handleDesignSystemImport(request: Request, env: Env): Promise<Response> {
+  let browser: ReturnType<typeof puppeteer.launch> extends Promise<infer T> ? T : never;
+
+  try {
+    const body = await request.json() as DesignSystemImportRequest;
+
+    // Validate required fields
+    const missing: string[] = [];
+    if (!body.url) missing.push('url');
+
+    // GitHub config only required if not dryRun
+    const githubToken = body.github?.token || env.GITHUB_TOKEN;
+    if (!body.dryRun) {
+      if (!body.github?.owner) missing.push('github.owner');
+      if (!body.github?.repo) missing.push('github.repo');
+      if (!githubToken) missing.push('github.token (or GITHUB_TOKEN env)');
+    }
+
+    if (missing.length > 0) {
+      throw new BlockGeneratorError(
+        `Missing required fields: ${missing.join(', ')}`,
+        'INVALID_REQUEST',
+        400
+      );
+    }
+
+    // Get Anthropic config for Claude Vision analysis
+    const anthropicConfig = getAnthropicConfig(env);
+    if (!anthropicConfig) {
+      throw new BlockGeneratorError(
+        'Anthropic API not configured',
+        'INTERNAL_ERROR',
+        500
+      );
+    }
+
+    console.log(`Starting design system import from: ${body.url}`);
+
+    // Launch browser
+    browser = await puppeteer.launch(env.BROWSER);
+    const page = await browser.newPage();
+
+    await page.setViewport({ width: 1440, height: 900 });
+
+    // Navigate to URL
+    console.log('Navigating to URL...');
+    await page.goto(body.url, { waitUntil: 'networkidle0', timeout: 30000 });
+
+    // Dismiss cookie banners
+    await dismissCookieBanners(page);
+
+    // Wait for page to settle
+    await new Promise(r => setTimeout(r, 1000));
+
+    // Step 1: Extract computed styles from browser
+    console.log('Extracting computed styles...');
+    const computedStyles = await extractDesignComputedStyles(page);
+
+    // Step 2: Take screenshot for Claude Vision analysis
+    console.log('Taking screenshot for Claude analysis...');
+    const screenshotBuffer = await page.screenshot({ type: 'png', fullPage: false }) as Buffer;
+    const screenshotBase64 = screenshotBuffer.toString('base64');
+
+    // Step 3: Get page HTML for stylesheet parsing
+    const pageContent = await page.content();
+
+    // Close page (keep browser for potential compression)
+    await page.close();
+
+    // Step 4: Parse stylesheets for CSS variables and fonts
+    console.log('Parsing stylesheets...');
+    const parsedCSS = await parseStylesheets(pageContent, body.url);
+
+    // Step 5: Download fonts
+    console.log(`Found ${parsedCSS.fontFaces.length} font faces, downloading...`);
+    const { fonts: downloadedFonts, fontBuffers, skippedFamilies } = await downloadFonts(parsedCSS.fontFaces);
+    console.log(`Downloaded ${downloadedFonts.length} fonts`);
+
+    // Step 6: Analyze with Claude Vision
+    console.log('Analyzing design with Claude Vision...');
+    const claudeDesign = await analyzeDesignWithClaude(
+      screenshotBase64,
+      {
+        model: anthropicConfig.useBedrock
+          ? (anthropicConfig.bedrockModel || 'anthropic.claude-sonnet-4-20250514-v1:0')
+          : 'claude-sonnet-4-20250514',
+        apiKey: anthropicConfig.apiKey,
+        bedrockToken: anthropicConfig.bedrockToken,
+        region: anthropicConfig.bedrockRegion,
+      },
+      env
+    );
+
+    // Step 7: Merge all extracted data
+    console.log('Merging extracted design data...');
+    const finalDesign = mergeExtractedDesign(computedStyles, parsedCSS, claudeDesign);
+    finalDesign.fonts = downloadedFonts;
+
+    // Step 8: Generate CSS files
+    console.log('Generating styles.css and fonts.css...');
+    const stylesCSS = generateStylesCSS(finalDesign);
+    const fontsCSS = generateFontsCSS(downloadedFonts, finalDesign.typography.bodyFont, finalDesign.typography.headingFont, skippedFamilies);
+    const fallbackFonts = generateFallbackFonts(
+      finalDesign.typography.bodyFont,
+      finalDesign.typography.headingFont
+    );
+
+    // Combine fallback fonts with styles.css (insert after :root block)
+    const finalStylesCSS = stylesCSS.replace(
+      '}\n\n@media (width >= 900px)',
+      `}\n\n/* fallback fonts */\n${fallbackFonts}\n\n@media (width >= 900px)`
+    );
+
+    // Step 9: Prepare files for GitHub
+    // Use session ID-based branch if provided, otherwise use main
+    const branch = body.sessionId || body.github?.branch || 'main';
+
+    // Generate style-guide CSS for visual design system blocks
+    const styleGuideCSS = generateStyleGuideCSS(finalDesign);
+
+    // Generate color-swatch block JS
+    const colorSwatchJS = `export default function decorate(block) {
+  const rows = block.querySelectorAll(':scope > div');
+  rows.forEach((row) => {
+    const cells = row.querySelectorAll(':scope > div');
+    cells.forEach((cell) => {
+      const paras = cell.querySelectorAll('p');
+      if (paras.length >= 2) {
+        const label = paras[0].textContent.trim();
+        const hex = paras[1].textContent.trim();
+
+        // Create swatch element
+        const swatch = document.createElement('div');
+        swatch.className = 'swatch-color';
+        swatch.style.backgroundColor = hex;
+        swatch.style.height = '80px';
+        swatch.style.borderRadius = '8px';
+        swatch.style.marginBottom = '8px';
+        swatch.style.border = '1px solid rgba(0,0,0,0.1)';
+
+        // Insert before label
+        cell.insertBefore(swatch, paras[0]);
+
+        // Style the paragraphs
+        paras[0].style.fontWeight = '600';
+        paras[0].style.margin = '4px 0';
+        paras[1].style.fontFamily = 'monospace';
+        paras[1].style.fontSize = '12px';
+        paras[1].style.opacity = '0.7';
+        paras[1].style.margin = '4px 0';
+      }
+    });
+  });
+}
+`;
+
+    const colorSwatchCSS = `.color-swatch {
+  margin-bottom: 24px;
+}
+
+.color-swatch > div {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 16px;
+}
+
+.color-swatch > div > div {
+  flex: 0 0 140px;
+}
+`;
+
+    // Image placeholder SVG for style guide
+    const imagePlaceholderSVG = `<svg width="1280" height="800" viewBox="0 0 1280 800" fill="none" xmlns="http://www.w3.org/2000/svg">
+<rect width="1280" height="800" fill="#F0F0F0"/>
+<path fill-rule="evenodd" clip-rule="evenodd" d="M529.954 336.456C529.954 326.991 537.627 319.318 547.092 319.318C556.557 319.318 564.23 326.991 564.23 336.456C564.23 345.92 556.557 353.593 547.092 353.593C537.627 353.593 529.954 345.92 529.954 336.456ZM547.092 313.46C534.392 313.46 524.096 323.755 524.096 336.456C524.096 349.156 534.392 359.451 547.092 359.451C559.792 359.451 570.087 349.156 570.087 336.456C570.087 323.755 559.792 313.46 547.092 313.46ZM611.751 366.971C612.653 366.971 613.504 367.386 614.059 368.097L659.813 426.672L685.27 394.827C685.826 394.131 686.668 393.727 687.558 393.727C688.448 393.727 689.29 394.131 689.846 394.827L759.359 481.782C760.062 482.662 760.198 483.866 759.711 484.88C759.223 485.895 758.197 486.54 757.071 486.54H700.936C700.875 486.54 700.814 486.538 700.754 486.534C700.694 486.538 700.634 486.54 700.573 486.54H522.929C521.809 486.54 520.787 485.902 520.297 484.895C519.806 483.889 519.931 482.691 520.621 481.808L609.443 368.097C609.998 367.386 610.849 366.971 611.751 366.971ZM702.002 480.682L663.52 431.417L687.558 401.346L750.98 480.682H702.002ZM611.751 374.658L528.933 480.682H694.569L611.751 374.658Z" fill="#ABABAB"/>
+</svg>`;
+
+    const files: Array<{ path: string; content: string; encoding?: 'utf-8' | 'base64' }> = [
+      { path: 'styles/styles.css', content: finalStylesCSS },
+      { path: 'styles/fonts.css', content: fontsCSS },
+      { path: 'styles/style-guide.css', content: styleGuideCSS },
+      { path: 'blocks/color-swatch/color-swatch.js', content: colorSwatchJS },
+      { path: 'blocks/color-swatch/color-swatch.css', content: colorSwatchCSS },
+      { path: 'icons/image-placeholder.svg', content: imagePlaceholderSVG },
+    ];
+
+    // Add font files as base64
+    for (const font of downloadedFonts) {
+      const buffer = fontBuffers.get(font.localPath);
+      if (buffer) {
+        const base64Content = arrayBufferToBase64(buffer);
+        files.push({
+          path: font.localPath,
+          content: base64Content,
+          encoding: 'base64',
+        });
+      }
+    }
+
+    // Step 10: Push to GitHub (skip if dryRun)
+    let githubResult = {
+      commitSha: '',
+      commitUrl: '',
+      branch,
+      filesCommitted: files.map(f => f.path),
+    };
+
+    const githubFetch = createGitHubFetcher(githubToken);
+
+    if (body.dryRun) {
+      console.log(`Dry run mode - skipping GitHub push. Would push ${files.length} files.`);
+    } else {
+      console.log(`Pushing ${files.length} files to GitHub...`);
+
+      // If using session ID, ensure branch exists (create from main)
+      if (body.sessionId) {
+        await ensureBranchExists(githubFetch, body.github.owner, body.github.repo, branch, 'main');
+      }
+
+      const { commitSha, commitUrl } = await pushFilesToBranchWithBinary(
+        githubFetch,
+        body.github.owner,
+        body.github.repo,
+        branch,
+        files,
+        `Import design system from ${body.url}`
+      );
+
+      console.log(`Successfully pushed design system: ${commitUrl}`);
+      githubResult = { commitSha, commitUrl, branch, filesCommitted: files.map(f => f.path) };
+    }
+
+    // Step 11: Generate preview page if requested
+    let previewResult: { previewUrl: string; daPath: string; sampleHtml: string } | undefined;
+
+    if (body.generatePreview && !body.dryRun) {
+      console.log('Generating design system preview page...');
+
+      // Generate sample HTML showcasing the design
+      const sampleHtml = generateStyleGuideHTML(finalDesign, body.url);
+
+      // Determine DA config - extract from GitHub URL if not provided
+      // Parse github owner/repo to determine DA org/site
+      const daOrg = body.da?.org || body.github.owner;
+      const daSite = body.da?.site || body.github.repo;
+      const daBasePath = body.da?.basePath || '/drafts/gen';
+      const daPath = `${daBasePath}/${body.sessionId}/design-preview`;
+
+      // Get DA token
+      let daToken = body.da?.token;
+      if (!daToken && env.DA_CLIENT_ID && env.DA_CLIENT_SECRET && env.DA_SERVICE_TOKEN) {
+        daToken = await exchangeDACredentialsForToken(
+          env.DA_CLIENT_ID,
+          env.DA_CLIENT_SECRET,
+          env.DA_SERVICE_TOKEN
+        );
+      }
+
+      if (daToken) {
+        try {
+          const daUrl = `https://admin.da.live/source/${daOrg}/${daSite}${daPath}.html`;
+
+          const formData = new FormData();
+          const blob = new Blob([sampleHtml], { type: 'text/html' });
+          formData.append('data', blob);
+
+          const daResponse = await fetch(daUrl, {
+            method: 'PUT',
+            headers: { 'Authorization': `Bearer ${daToken}` },
+            body: formData,
+          });
+
+          if (daResponse.ok) {
+            console.log(`Pushed sample content to DA: ${daPath}`);
+
+            // Trigger AEM preview
+            const previewUrl = `https://${branch}--${body.github.repo}--${body.github.owner}.aem.page${daPath}`;
+            const aemPreviewApiUrl = `https://admin.hlx.page/preview/${body.github.owner}/${body.github.repo}/${branch}${daPath}`;
+
+            try {
+              const imsToken = await getDAToken(env);
+              let aemResponse = await fetch(aemPreviewApiUrl, {
+                method: 'POST',
+                headers: { 'Authorization': `Bearer ${imsToken}` },
+              });
+
+              if (aemResponse.status === 401) {
+                clearCachedToken();
+                const freshToken = await getDAToken(env);
+                aemResponse = await fetch(aemPreviewApiUrl, {
+                  method: 'POST',
+                  headers: { 'Authorization': `Bearer ${freshToken}` },
+                });
+              }
+
+              if (aemResponse.ok) {
+                console.log(`AEM preview triggered: ${previewUrl}`);
+              } else {
+                console.warn(`AEM preview trigger failed: ${aemResponse.status}`);
+              }
+            } catch (aemErr) {
+              console.warn('AEM preview trigger error:', aemErr);
+            }
+
+            previewResult = {
+              previewUrl,
+              daPath,
+              sampleHtml,
+            };
+          } else {
+            console.warn(`DA push failed: ${daResponse.status}`);
+          }
+        } catch (daErr) {
+          console.warn('DA push error:', daErr);
+        }
+      } else {
+        console.log('No DA token available - skipping preview generation');
+      }
+    }
+
+    // Build response
+    const response: DesignSystemImportResponse = {
+      success: true,
+      extractedDesign: finalDesign,
+      files: {
+        stylesCSS: finalStylesCSS,
+        fontsCSS,
+        fontFiles: downloadedFonts.map(f => f.localPath),
+      },
+      github: githubResult,
+      preview: previewResult,
+    };
+
+    return Response.json(response, { headers: corsHeaders(env) });
+
+  } catch (error) {
+    console.error('Design system import error:', error);
+
+    if (error instanceof BlockGeneratorError) {
+      return Response.json(
+        { success: false, error: error.message, code: error.code },
+        { status: error.statusCode, headers: corsHeaders(env) }
+      );
+    }
+
+    return Response.json(
+      { success: false, error: String(error), code: 'INTERNAL_ERROR' },
+      { status: 500, headers: corsHeaders(env) }
+    );
+  } finally {
+    if (browser) {
+      try {
+        await browser.close();
+      } catch (e) {
+        console.error('Failed to close browser:', e);
+      }
+    }
+  }
 }
 
 /**

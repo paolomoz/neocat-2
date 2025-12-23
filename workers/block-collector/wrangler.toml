@@ -1,0 +1,33 @@
+name = "eds-block-collector"
+main = "src/index.ts"
+compatibility_date = "2024-09-23"
+compatibility_flags = ["nodejs_compat"]
+
+[vars]
+ALLOWED_ORIGINS = "*"
+# Seed developers for GitHub discovery (top EDS contributors)
+SEED_DEVELOPERS = "davidnuescheler,trieloff,rofe,fkakatie,kptdobe,ramboz,tripodsan,dominique-pfister,dylandepass,mhaack"
+
+# Browser Rendering for screenshots
+[browser]
+binding = "BROWSER"
+
+# D1 Database for metadata storage
+[[d1_databases]]
+binding = "DB"
+database_name = "block-database"
+database_id = "placeholder-create-with-wrangler-d1-create"
+
+# R2 Bucket for blob storage (screenshots, HTML, CSS)
+[[r2_buckets]]
+binding = "BUCKET"
+bucket_name = "block-assets"
+
+# Weekly cron trigger for discovery and crawling
+[triggers]
+crons = ["0 2 * * 0"]  # Every Sunday at 2AM UTC
+
+# Environment-specific secrets (set via wrangler secret put):
+# - GITHUB_TOKEN: Personal access token for GitHub API
+# - WAPPALYZER_API_KEY: Wappalyzer technology detection API (optional)
+# - LIGHTHOUSE_API_KEY: PageSpeed Insights API key (optional)
