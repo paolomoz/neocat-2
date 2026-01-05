@@ -1,0 +1,90 @@
+.booking-options {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 40px;
+  max-width: 1200px;
+  margin: 0 auto;
+  padding: 40px 20px;
+  background-color: rgb(255, 255, 255);
+  font-family: Gotham-Medium, Arial, sans-serif;
+}
+
+.booking-options > div {
+  display: flex;
+  flex-direction: column;
+}
+
+.booking-options > div:first-child .section-title {
+  display: block;
+}
+
+.booking-options .section-title {
+  font-family: gotham-light, Arial, sans-serif;
+  font-size: 36px;
+  font-weight: 400;
+  color: rgb(97, 18, 107);
+  line-height: 1.2;
+  margin-bottom: 30px;
+  grid-column: 1 / -1;
+}
+
+.booking-options .card-heading {
+  font-family: gotham-light, Arial, sans-serif;
+  font-size: 25px;
+  font-weight: 400;
+  color: rgb(97, 18, 107);
+  line-height: 32.5px;
+  padding: 26px 0 12px;
+  margin: 0;
+}
+
+.booking-options .card-description {
+  font-family: gotham-medium, Arial, sans-serif;
+  font-size: 12px;
+  font-weight: 400;
+  color: rgb(51, 51, 51);
+  line-height: 15.6px;
+  text-align: left;
+  margin-bottom: 20px;
+  flex-grow: 1;
+}
+
+.booking-options .card-cta a {
+  font-family: gotham-medium, Arial, sans-serif;
+  font-size: 12px;
+  font-weight: 400;
+  color: rgb(190, 0, 80);
+  text-decoration: none;
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  background: none;
+  border: none;
+  padding: 0;
+  border-radius: 0;
+}
+
+.booking-options .card-cta a::after {
+  content: '→';
+  font-size: 14px;
+  transition: transform 0.2s ease;
+}
+
+.booking-options .card-cta a:hover::after {
+  transform: translateX(4px);
+}
+
+.booking-options .card-cta a:hover {
+  text-decoration: underline;
+}
+
+@media (max-width: 768px) {
+  .booking-options {
+    grid-template-columns: 1fr;
+    gap: 30px;
+  }
+  
+  .booking-options .section-title {
+    font-size: 28px;
+  }
+}
