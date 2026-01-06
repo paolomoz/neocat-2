@@ -117,14 +117,6 @@
           <div class="aem-sidebar-url" id="aem-current-url"></div>
 
           <div class="aem-dashboard-actions">
-            <button id="aem-import-design-btn" class="aem-action-btn">
-              <span class="aem-action-icon">&#127912;</span>
-              <span class="aem-action-text">
-                <strong>Import Design System</strong>
-                <small>Extract colors, fonts, spacing</small>
-              </span>
-            </button>
-
             <button id="aem-select-block-btn" class="aem-action-btn">
               <span class="aem-action-icon">&#129521;</span>
               <span class="aem-action-text">
@@ -132,24 +124,6 @@
                 <small>Pick element to generate block</small>
               </span>
             </button>
-
-            <button id="aem-import-page-btn" class="aem-action-btn">
-              <span class="aem-action-icon">&#128196;</span>
-              <span class="aem-action-text">
-                <strong>Import This Page</strong>
-                <small>Section-by-section import</small>
-              </span>
-            </button>
-          </div>
-
-          <div class="aem-block-library">
-            <div class="aem-library-header">
-              <span>Block Library (<span id="aem-block-count">0</span>)</span>
-              <button id="aem-refresh-library" class="aem-icon-btn" title="Refresh">&#8635;</button>
-            </div>
-            <div id="aem-block-list" class="aem-block-list">
-              <div class="aem-empty-library">Loading...</div>
-            </div>
           </div>
         </div>
 
@@ -309,10 +283,7 @@
     sidebar.querySelector('#aem-save-config').addEventListener('click', handleSaveConfig);
 
     // Dashboard
-    sidebar.querySelector('#aem-import-design-btn').addEventListener('click', startDesignImport);
     sidebar.querySelector('#aem-select-block-btn').addEventListener('click', () => startSelection('block'));
-    sidebar.querySelector('#aem-import-page-btn').addEventListener('click', startPageImport);
-    sidebar.querySelector('#aem-refresh-library').addEventListener('click', loadBlockLibrary);
 
     // Selection
     sidebar.querySelector('#aem-cancel-selection').addEventListener('click', cancelSelection);
@@ -399,7 +370,6 @@
     } else if (state.config.githubRepo) {
       showView(VIEWS.DASHBOARD);
       updateDashboard();
-      loadBlockLibrary();
     } else {
       showView(VIEWS.SETUP);
     }
@@ -465,7 +435,6 @@
     setTimeout(() => {
       showView(VIEWS.DASHBOARD);
       updateDashboard();
-      loadBlockLibrary();
     }, 500);
   }
 
@@ -805,7 +774,6 @@
       if (response.success) {
         await clearState();
         showView(VIEWS.DASHBOARD);
-        loadBlockLibrary();
       } else {
         throw new Error(response.error);
       }
@@ -1228,7 +1196,6 @@
         state.pageImport = null;
         sidebar.querySelector('.aem-code-section').classList.remove('aem-hidden');
         showView(VIEWS.DASHBOARD);
-        loadBlockLibrary();
         alert('Page imported successfully!');
       } else {
         throw new Error(response.error);
