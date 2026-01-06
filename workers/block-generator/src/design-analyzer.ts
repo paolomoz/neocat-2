@@ -420,20 +420,26 @@ Generate a complete EDS block that visually matches the screenshot. Pay close at
 - Any animations or transitions
 
 ## EDS Block Structure Requirements
-EDS blocks follow this HTML pattern:
+EDS blocks follow this HTML pattern where ONE ROW = ONE ITEM (card, slide, etc.):
 \`\`\`html
 <div class="{block-name}">
-  <div><!-- row 1 -->
+  <div><!-- row 1 = item 1 -->
+    <div><!-- cell 1: e.g. image --></div>
+    <div><!-- cell 2: e.g. title --></div>
+    <div><!-- cell 3: e.g. description --></div>
+    <div><!-- cell 4: e.g. link --></div>
+  </div>
+  <div><!-- row 2 = item 2 -->
     <div><!-- cell 1 --></div>
     <div><!-- cell 2 --></div>
-  </div>
-  <div><!-- row 2 -->
-    <div><!-- cell --></div>
+    <div><!-- cell 3 --></div>
+    <div><!-- cell 4 --></div>
   </div>
 </div>
 \`\`\`
 
-The JS decoration function transforms this into the final rendered structure.
+CRITICAL: Each row represents ONE complete content item. The cells within a row are the different properties of that item.
+The JS decoration function receives this EXACT structure and must work with it - do NOT expect a different layout.
 
 ## Return Format
 Return a JSON object with this exact structure:
@@ -452,6 +458,27 @@ Return a JSON object with this exact structure:
 5. Match colors exactly - use the hex values you see
 6. Position text overlays exactly as shown (e.g., left side with semi-transparent background)
 7. Include hover states if buttons/links are present
+
+## CRITICAL - JS Decoration Pattern
+The JS decorate function receives block.children as ROWS, where each row is ONE item.
+Each row has cells (row.children) containing the item's properties.
+Example pattern:
+\`\`\`js
+export default function decorate(block) {
+  [...block.children].forEach((row) => {
+    const cells = [...row.children];
+    // cells[0] = first property (e.g., image)
+    // cells[1] = second property (e.g., title)
+    // cells[2] = third property (e.g., description)
+    // cells[3] = fourth property (e.g., link)
+    row.classList.add('item');
+    if (cells[0]) cells[0].classList.add('item-image');
+    if (cells[1]) cells[1].classList.add('item-title');
+    // ... add classes, restructure as needed
+  });
+}
+\`\`\`
+DO NOT write JS that expects multiple rows per item or type/value pairs.
 
 ## CRITICAL - Image Handling
 - NEVER include base64 image data in your response

@@ -300,6 +300,21 @@ export default {
       return handleAnalyze(request, env);
     }
 
+    // Compose page from sections and push to DA
+    if (url.pathname === '/compose-page' && request.method === 'POST') {
+      return handleComposePage(request, env);
+    }
+
+    // Finalize page import (merge branch to main)
+    if (url.pathname === '/page-finalize' && request.method === 'POST') {
+      return handlePageFinalize(request, env);
+    }
+
+    // Generate a single block for a page import section (standalone workflow)
+    if (url.pathname === '/generate-block-for-section' && request.method === 'POST') {
+      return handleGenerateBlockForSection(request, env);
+    }
+
     // Main generation endpoint (JSON response)
     if (url.pathname === '/generate' && request.method === 'POST') {
       return handleGenerate(request, env);
@@ -357,6 +372,11 @@ export default {
       return handleDesignSystemImport(request, env);
     }
 
+    // Design System Finalize endpoint (merge branch to main)
+    if (url.pathname === '/design-system-finalize' && request.method === 'POST') {
+      return handleDesignSystemFinalize(request, env);
+    }
+
     // Debug endpoint to check config
     if (url.pathname === '/debug-config' && request.method === 'GET') {
       return Response.json({
@@ -373,11 +393,6 @@ export default {
     // Test UI for block-generate and block-refine
     if (url.pathname === '/test' && request.method === 'GET') {
       return handleBlockTestUI(env);
-    }
-
-    // Test UI for block-github and block-da
-    if (url.pathname === '/test-save' && request.method === 'GET') {
-      return handleSaveTestUI(env);
     }
 
     // 404 for unknown routes
@@ -845,6 +860,7 @@ DESCRIPTION: ${sectionDescription}
 2. **IMAGES: Use data-img-ref="N" ONLY** - reference images by [IMG_N] number, NO src attribute
 3. **MATCH THE VISUAL DESIGN** from the screenshot - colors, fonts, layout, spacing
 4. The generated block MUST contain the same content as the original - same headings, same paragraphs, same links
+5. **NO WRAPPER BACKGROUNDS** - Do NOT add background-color to .{block-name}-wrapper selectors. EDS wraps blocks automatically. Only style the block element itself and its children.
 
 ## EXTRACTED HTML FROM THE PAGE (this is the actual content - use it!)
 
@@ -882,6 +898,13 @@ The **CSS** styles the **rendered output** (what decorate() produces), NOT the a
 2. **JS**: decorate(block) that reads the simple structure and builds the rendered DOM matching the screenshot
 3. **CSS**: Styles targeting the rendered DOM structure that decorate() creates
 
+## CSS Guidelines
+
+- Style ONLY the block class and its children: .{block-name}, .{block-name} .child-element
+- NEVER style -wrapper or -container selectors (EDS adds these automatically)
+- NEVER add background-color to wrapper elements
+- Keep backgrounds transparent unless the ORIGINAL design clearly has a colored section background
+
 ## Return Format
 
 Return JSON:
@@ -889,7 +912,7 @@ Return JSON:
   "blockName": "descriptive-block-name",
   "componentType": "hero|cards|columns|tabs|content|etc",
   "html": "<!-- EDS block - use data-img-ref for images -->",
-  "css": "/* CSS matching the screenshot design */",
+  "css": "/* CSS for .{block-name} and children ONLY - no wrapper styles */",
   "js": "/* ES module: export default function decorate(block) { ... } */"
 }
 
@@ -1556,6 +1579,606 @@ async function handleGenerate(request: Request, env: Env): Promise<Response> {
     return Response.json(response, { status: 200, headers: corsHeaders(env) });
   } catch (error) {
     return handleError(error, env);
+  }
+}
+
+/**
+ * Compose page from section selections and push to DA
+ */
+interface ComposePageSection {
+  name: string;
+  type: string;
+  description: string;
+  yStart: number;
+  yEnd: number;
+  blockChoice: string; // existing block name or '__generate__'
+}
+
+interface AcceptedBlockInfo {
+  blockName: string;
+  branch: string;
+  sessionId: string;
+}
+
+interface ComposePageRequest {
+  url: string;
+  sections: ComposePageSection[];
+  pageTitle?: string;
+  sessionId: string;
+  acceptedBlocks?: Record<number, AcceptedBlockInfo>; // sectionIndex -> block info from standalone workflow
+  github: { owner: string; repo: string };
+  da: { org: string; site: string };
+}
+
+async function handleComposePage(request: Request, env: Env): Promise<Response> {
+  try {
+    const contentType = request.headers.get('content-type') || '';
+    if (!contentType.includes('application/json')) {
+      return Response.json(
+        { success: false, error: 'Content-Type must be application/json' },
+        { status: 400, headers: corsHeaders(env) }
+      );
+    }
+
+    const body = await request.json() as ComposePageRequest;
+
+    // Validate required fields
+    if (!body.url || !body.sections || !body.sessionId || !body.da?.org || !body.da?.site) {
+      return Response.json(
+        { success: false, error: 'Missing required fields: url, sections, sessionId, da.org, da.site' },
+        { status: 400, headers: corsHeaders(env) }
+      );
+    }
+
+    // GitHub info is required for creating page-import branch
+    const githubToken = body.github?.token || env.GITHUB_TOKEN;
+    if (!body.github?.owner || !body.github?.repo) {
+      return Response.json(
+        { success: false, error: 'Missing required fields: github.owner, github.repo' },
+        { status: 400, headers: corsHeaders(env) }
+      );
+    }
+
+    console.log(`Composing page from ${body.sections.length} sections for ${body.url}`);
+
+    // Create page-import branch from main
+    const pageBranch = `page-${body.sessionId}`;
+    const githubFetch = createGitHubFetcher(githubToken);
+
+    console.log(`Creating page-import branch: ${pageBranch}`);
+    await ensureBranchExists(githubFetch, body.github.owner, body.github.repo, pageBranch, 'main');
+
+    // Track accepted blocks that need to be copied to page branch
+    const acceptedBlocksMap: Map<number, { blockName: string }> = new Map();
+
+    // Copy accepted blocks from their preview branches to the page branch
+    if (body.acceptedBlocks && Object.keys(body.acceptedBlocks).length > 0) {
+      console.log(`Copying ${Object.keys(body.acceptedBlocks).length} accepted blocks to page branch...`);
+
+      for (const [indexStr, blockInfo] of Object.entries(body.acceptedBlocks)) {
+        const index = parseInt(indexStr, 10);
+        const { blockName, branch } = blockInfo;
+
+        console.log(`Copying block ${blockName} from branch ${branch} to ${pageBranch}`);
+
+        try {
+          // Get JS and CSS files from the accepted block's branch
+          const jsContent = await getFileFromBranch(
+            githubFetch,
+            body.github.owner,
+            body.github.repo,
+            branch,
+            `blocks/${blockName}/${blockName}.js`
+          );
+
+          const cssContent = await getFileFromBranch(
+            githubFetch,
+            body.github.owner,
+            body.github.repo,
+            branch,
+            `blocks/${blockName}/${blockName}.css`
+          );
+
+          if (jsContent && cssContent) {
+            // Push the block files to the page branch
+            await pushFilesToBranch(
+              githubFetch,
+              body.github.owner,
+              body.github.repo,
+              pageBranch,
+              [
+                { path: `blocks/${blockName}/${blockName}.js`, content: jsContent },
+                { path: `blocks/${blockName}/${blockName}.css`, content: cssContent },
+              ],
+              `Add ${blockName} block for page import ${body.sessionId}`
+            );
+
+            acceptedBlocksMap.set(index, { blockName });
+            console.log(`Block ${blockName} copied successfully`);
+          } else {
+            console.warn(`Could not find block files for ${blockName} on branch ${branch}`);
+          }
+        } catch (copyError) {
+          console.error(`Failed to copy block ${blockName}:`, copyError);
+        }
+      }
+
+      console.log(`Block copying complete: ${acceptedBlocksMap.size}/${Object.keys(body.acceptedBlocks).length} blocks copied`);
+    }
+
+    // Launch browser to extract actual content from sections
+    let browser;
+    try {
+      browser = await puppeteer.launch(env.BROWSER);
+      const page = await browser.newPage();
+      await page.setViewport({ width: 1440, height: 900 });
+
+      console.log('Loading source page for content extraction...');
+      await page.goto(body.url, { waitUntil: 'networkidle0', timeout: 30000 });
+
+      // Dismiss cookie banners
+      await dismissCookieBanners(page);
+      await new Promise(r => setTimeout(r, 1000));
+
+      // Extract content for each section based on Y-coordinates
+      const sectionsHtml: string[] = [];
+
+      for (let i = 0; i < body.sections.length; i++) {
+        const section = body.sections[i];
+        console.log(`Extracting content for section ${i + 1}: ${section.name} (Y: ${section.yStart}-${section.yEnd})`);
+
+        // Extract actual HTML content from the section's Y-range
+        const sectionContent = await page.evaluate((yStart: number, yEnd: number) => {
+          const elements: Element[] = [];
+          const allElements = document.querySelectorAll('body *');
+
+          allElements.forEach(el => {
+            const rect = el.getBoundingClientRect();
+            const scrollY = window.scrollY;
+            const elTop = rect.top + scrollY;
+            const elBottom = rect.bottom + scrollY;
+
+            // Check if element is within the Y-range and is a meaningful content element
+            if (elTop >= yStart && elBottom <= yEnd) {
+              const tagName = el.tagName.toLowerCase();
+              // Only collect top-level content elements, not nested ones
+              if (['section', 'article', 'div', 'header', 'footer', 'nav', 'main'].includes(tagName)) {
+                // Check if this is a direct child or reasonably top-level
+                const parent = el.parentElement;
+                if (parent && !elements.includes(parent)) {
+                  elements.push(el);
+                }
+              }
+            }
+          });
+
+          // If we found section-level elements, use the largest one
+          if (elements.length > 0) {
+            // Sort by content size and get the most comprehensive one
+            elements.sort((a, b) => b.innerHTML.length - a.innerHTML.length);
+            const bestElement = elements[0];
+
+            // Extract and clean the HTML
+            const clone = bestElement.cloneNode(true) as HTMLElement;
+
+            // Remove scripts and styles
+            clone.querySelectorAll('script, style, noscript').forEach(el => el.remove());
+
+            // Convert images to absolute URLs
+            clone.querySelectorAll('img').forEach(img => {
+              const src = img.getAttribute('src');
+              if (src && !src.startsWith('http') && !src.startsWith('data:')) {
+                img.setAttribute('src', new URL(src, window.location.href).href);
+              }
+            });
+
+            // Convert links to absolute URLs
+            clone.querySelectorAll('a').forEach(a => {
+              const href = a.getAttribute('href');
+              if (href && !href.startsWith('http') && !href.startsWith('#') && !href.startsWith('mailto:')) {
+                a.setAttribute('href', new URL(href, window.location.href).href);
+              }
+            });
+
+            return clone.innerHTML;
+          }
+
+          return null;
+        }, section.yStart, section.yEnd);
+
+        let blockHtml: string;
+        // Use accepted block name if available, otherwise fall back to choice or derived name
+        let blockName: string;
+        if (section.blockChoice === '__generate__') {
+          const accepted = acceptedBlocksMap.get(i);
+          blockName = accepted?.blockName || (section.type || section.name.toLowerCase().replace(/\s+/g, '-')).replace(/[^a-z0-9-]/g, '');
+        } else {
+          blockName = section.blockChoice;
+        }
+
+        if (sectionContent) {
+          // Wrap extracted content in a block table
+          blockHtml = `
+      <table>
+        <tr><th colspan="2">${blockName}</th></tr>
+        <tr>
+          <td>${sectionContent}</td>
+        </tr>
+      </table>`;
+        } else {
+          // Fallback: create block with description if extraction failed
+          console.warn(`Could not extract content for section: ${section.name}`);
+          blockHtml = `
+      <table>
+        <tr><th colspan="2">${blockName}</th></tr>
+        <tr>
+          <td>
+            <p><strong>${section.name}</strong></p>
+            <p>${section.description || ''}</p>
+          </td>
+        </tr>
+      </table>`;
+        }
+
+        sectionsHtml.push(`    <div>${blockHtml}
+    </div>`);
+      }
+
+      // Compose full page HTML
+      const pageTitle = body.pageTitle || new URL(body.url).pathname.split('/').pop() || 'imported-page';
+      const pageHtml = `<body>
+  <header></header>
+  <main>
+${sectionsHtml.join('\n    <hr>\n')}
+  </main>
+  <footer></footer>
+</body>`;
+
+      await browser.close();
+
+      console.log('Generated page HTML:', pageHtml.substring(0, 500) + '...');
+
+      // Get DA token
+      let daToken: string | null = null;
+      if (env.DA_CLIENT_ID && env.DA_CLIENT_SECRET && env.DA_SERVICE_TOKEN) {
+        daToken = await exchangeDACredentialsForToken(
+          env.DA_CLIENT_ID,
+          env.DA_CLIENT_SECRET,
+          env.DA_SERVICE_TOKEN
+        );
+      }
+
+      if (!daToken) {
+        return Response.json(
+          { success: false, error: 'DA service account not configured' },
+          { status: 500, headers: corsHeaders(env) }
+        );
+      }
+
+      // Determine DA path from URL - include sessionId for isolation
+      const urlPath = new URL(body.url).pathname;
+      const pageName = urlPath.replace(/\.html$/, '').replace(/\/$/, '').replace(/^\//, '') || 'index';
+      const daPath = `/drafts/imports/${body.sessionId}/${pageName}`;
+
+      // Push to DA
+      const daUrl = `https://admin.da.live/source/${body.da.org}/${body.da.site}${daPath}.html`;
+      console.log('Pushing to DA:', daUrl);
+
+      const formData = new FormData();
+      formData.append('data', new Blob([pageHtml], { type: 'text/html' }));
+
+      const daResponse = await fetch(daUrl, {
+        method: 'PUT',
+        headers: { 'Authorization': `Bearer ${daToken}` },
+        body: formData,
+      });
+
+      if (!daResponse.ok) {
+        const errorText = await daResponse.text();
+        console.error('DA push failed:', daResponse.status, errorText);
+        return Response.json(
+          { success: false, error: `DA push failed: ${daResponse.status}` },
+          { status: 500, headers: corsHeaders(env) }
+        );
+      }
+
+      console.log('DA push successful');
+
+      // Trigger AEM preview via admin API - use page branch for code
+      const previewUrl = `https://${pageBranch}--${body.da.site}--${body.da.org}.aem.page${daPath}`;
+      const aemPreviewApiUrl = `https://admin.hlx.page/preview/${body.github.owner}/${body.github.repo}/${pageBranch}${daPath}`;
+
+      try {
+        console.log('Triggering AEM preview:', aemPreviewApiUrl);
+        let previewResponse = await fetch(aemPreviewApiUrl, {
+          method: 'POST',
+          headers: { 'Authorization': `Bearer ${daToken}` },
+        });
+
+        // Retry with fresh token if auth failed
+        if (previewResponse.status === 401) {
+          const freshToken = await exchangeDACredentialsForToken(
+            env.DA_CLIENT_ID!,
+            env.DA_CLIENT_SECRET!,
+            env.DA_SERVICE_TOKEN!
+          );
+          previewResponse = await fetch(aemPreviewApiUrl, {
+            method: 'POST',
+            headers: { 'Authorization': `Bearer ${freshToken}` },
+          });
+        }
+
+        console.log('AEM preview response:', previewResponse.status);
+      } catch (previewError) {
+        console.warn('AEM preview trigger failed (non-fatal):', previewError);
+      }
+
+      return Response.json({
+        success: true,
+        previewUrl,
+        daPath,
+        branch: pageBranch,
+        sectionsProcessed: body.sections.length,
+        blocksCopied: acceptedBlocksMap.size,
+      }, { headers: corsHeaders(env) });
+
+    } catch (browserError) {
+      if (browser) await browser.close();
+      throw browserError;
+    }
+
+  } catch (error) {
+    console.error('Compose page error:', error);
+    return Response.json(
+      { success: false, error: error instanceof Error ? error.message : 'Unknown error' },
+      { status: 500, headers: corsHeaders(env) }
+    );
+  }
+}
+
+/**
+ * Request type for page finalize
+ */
+interface PageFinalizeRequest {
+  branch: string;
+  github: { owner: string; repo: string; token?: string };
+}
+
+/**
+ * Handles /page-finalize endpoint
+ * Merges page import branch to main
+ */
+async function handlePageFinalize(request: Request, env: Env): Promise<Response> {
+  try {
+    const body = await request.json() as PageFinalizeRequest;
+
+    // Validate required fields
+    if (!body.branch || !body.github?.owner || !body.github?.repo) {
+      return Response.json(
+        { success: false, error: 'Missing required fields: branch, github.owner, github.repo' },
+        { status: 400, headers: corsHeaders(env) }
+      );
+    }
+
+    const githubToken = body.github?.token || env.GITHUB_TOKEN;
+    if (!githubToken) {
+      return Response.json(
+        { success: false, error: 'GitHub token not provided and GITHUB_TOKEN env not configured' },
+        { status: 401, headers: corsHeaders(env) }
+      );
+    }
+
+    console.log(`Finalizing page import: merging ${body.branch} into main`);
+
+    const githubFetch = createGitHubFetcher(githubToken);
+
+    // Create merge into main using GitHub merge API
+    const mergeResponse = await githubFetch(
+      `https://api.github.com/repos/${body.github.owner}/${body.github.repo}/merges`,
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          base: 'main',
+          head: body.branch,
+          commit_message: `Merge page import ${body.branch}`,
+        }),
+      }
+    );
+
+    if (!mergeResponse.ok) {
+      // Check for specific errors
+      if (mergeResponse.status === 409) {
+        // Merge conflict
+        const error = await mergeResponse.json() as { message: string };
+        return Response.json(
+          { success: false, error: `Merge conflict: ${error.message}` },
+          { status: 409, headers: corsHeaders(env) }
+        );
+      }
+      const error = await mergeResponse.text();
+      throw new Error(`Merge failed: ${mergeResponse.status} - ${error}`);
+    }
+
+    const mergeResult = await mergeResponse.json() as { sha: string; html_url?: string };
+    console.log(`Page branch merged successfully: ${mergeResult.sha}`);
+
+    // Optionally delete the branch after merge
+    try {
+      await githubFetch(
+        `https://api.github.com/repos/${body.github.owner}/${body.github.repo}/git/refs/heads/${body.branch}`,
+        { method: 'DELETE' }
+      );
+      console.log(`Deleted branch ${body.branch}`);
+    } catch (deleteError) {
+      console.warn(`Failed to delete branch ${body.branch}:`, deleteError);
+      // Non-fatal, continue
+    }
+
+    return Response.json({
+      success: true,
+      commitSha: mergeResult.sha,
+      commitUrl: mergeResult.html_url,
+    }, { headers: corsHeaders(env) });
+
+  } catch (error) {
+    console.error('Page finalize error:', error);
+    return Response.json(
+      { success: false, error: error instanceof Error ? error.message : 'Unknown error' },
+      { status: 500, headers: corsHeaders(env) }
+    );
+  }
+}
+
+/**
+ * Request type for generate-block-for-section
+ */
+interface GenerateBlockForSectionRequest {
+  url: string;
+  sectionName: string;
+  sectionDescription: string;
+  sectionType?: string;
+  sectionHtml?: string; // Optional HTML for better context
+  yStart: number;
+  yEnd: number;
+  sessionId: string;
+  github: { owner: string; repo: string; token?: string };
+  da: { org: string; site: string };
+}
+
+/**
+ * Handles /generate-block-for-section endpoint
+ * Generates a single block using the standalone workflow (with preview branch)
+ */
+async function handleGenerateBlockForSection(request: Request, env: Env): Promise<Response> {
+  try {
+    const body = await request.json() as GenerateBlockForSectionRequest;
+
+    // Validate required fields
+    if (!body.url || !body.sectionName || !body.sectionDescription || !body.sessionId ||
+        !body.github?.owner || !body.github?.repo || !body.da?.org || !body.da?.site) {
+      return Response.json(
+        { success: false, error: 'Missing required fields' },
+        { status: 400, headers: corsHeaders(env) }
+      );
+    }
+
+    const githubToken = body.github?.token || env.GITHUB_TOKEN;
+    if (!githubToken) {
+      return Response.json(
+        { success: false, error: 'GitHub token not provided' },
+        { status: 401, headers: corsHeaders(env) }
+      );
+    }
+
+    console.log(`Generating block for section: ${body.sectionName} (Y: ${body.yStart}-${body.yEnd})`);
+
+    // Generate block using Claude Vision (same as standalone block workflow)
+    const block = await generateBlockFromDescription(
+      body.url,
+      body.sectionDescription,
+      body.sectionName,
+      env,
+      body.yStart,
+      body.yEnd
+    );
+
+    if (!block) {
+      return Response.json(
+        { success: false, error: 'Block generation failed' },
+        { status: 500, headers: corsHeaders(env) }
+      );
+    }
+
+    const blockName = block.blockName || body.sectionType || body.sectionName.toLowerCase().replace(/\s+/g, '-').replace(/[^a-z0-9-]/g, '');
+    console.log(`Block generated: ${blockName}`);
+
+    // Create a preview branch for this block (using session ID)
+    const variantBranch = `${body.sessionId}-1-1`; // Single iteration for page import
+    const githubFetch = createGitHubFetcher(githubToken);
+
+    console.log(`Creating preview branch: ${variantBranch}`);
+    await ensureBranchExists(githubFetch, body.github.owner, body.github.repo, variantBranch, 'main');
+
+    // Push block code to branch
+    const { commitSha, commitUrl } = await pushFilesToBranch(
+      githubFetch,
+      body.github.owner,
+      body.github.repo,
+      variantBranch,
+      [
+        { path: `blocks/${blockName}/${blockName}.js`, content: block.js },
+        { path: `blocks/${blockName}/${blockName}.css`, content: block.css },
+      ],
+      `Add ${blockName} block for section "${body.sectionName}"`
+    );
+
+    console.log(`Block code pushed to GitHub: ${commitUrl}`);
+
+    // Push HTML to DA for preview
+    const daBasePath = '/drafts/gen';
+    const variantDaPath = `${daBasePath}/${body.sessionId}-1-1`;
+    const wrappedHtml = wrapBlockInPageStructure(block.html);
+
+    // Get DA token
+    let daToken: string | null = null;
+    if (env.DA_CLIENT_ID && env.DA_CLIENT_SECRET && env.DA_SERVICE_TOKEN) {
+      daToken = await exchangeDACredentialsForToken(
+        env.DA_CLIENT_ID,
+        env.DA_CLIENT_SECRET,
+        env.DA_SERVICE_TOKEN
+      );
+    }
+
+    if (daToken) {
+      const daUrl = `https://admin.da.live/source/${body.da.org}/${body.da.site}${variantDaPath}.html`;
+      const formData = new FormData();
+      formData.append('data', new Blob([wrappedHtml], { type: 'text/html' }));
+
+      const daResponse = await fetch(daUrl, {
+        method: 'PUT',
+        headers: { 'Authorization': `Bearer ${daToken}` },
+        body: formData,
+      });
+
+      if (daResponse.ok) {
+        console.log(`Block HTML pushed to DA: ${variantDaPath}`);
+
+        // Trigger AEM preview
+        const aemPreviewUrl = `https://admin.hlx.page/preview/${body.github.owner}/${body.github.repo}/${variantBranch}${variantDaPath}`;
+        try {
+          await fetch(aemPreviewUrl, {
+            method: 'POST',
+            headers: { 'Authorization': `Bearer ${daToken}` },
+          });
+          console.log('AEM preview triggered');
+        } catch (e) {
+          console.warn('AEM preview trigger failed (non-fatal):', e);
+        }
+      } else {
+        console.warn('DA push failed:', await daResponse.text());
+      }
+    }
+
+    // Build preview URL
+    const previewUrl = `https://${variantBranch}--${body.da.site}--${body.da.org}.aem.page${variantDaPath}`;
+
+    return Response.json({
+      success: true,
+      blockName,
+      previewUrl,
+      branch: variantBranch,
+      html: block.html,
+      css: block.css,
+      js: block.js,
+    }, { headers: corsHeaders(env) });
+
+  } catch (error) {
+    console.error('Generate block for section error:', error);
+    return Response.json(
+      { success: false, error: error instanceof Error ? error.message : 'Unknown error' },
+      { status: 500, headers: corsHeaders(env) }
+    );
   }
 }
 
@@ -3988,354 +4611,6 @@ function handleBlockTestUI(env: Env): Response {
 }
 
 /**
- * Returns the test UI HTML page for block-github and block-da
- */
-function handleSaveTestUI(env: Env): Response {
-  const html = `<!DOCTYPE html>
-<html lang="en">
-<head>
-  <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Block Save Test UI</title>
-  <style>
-    * { box-sizing: border-box; margin: 0; padding: 0; }
-    body {
-      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
-      background: linear-gradient(135deg, #1a1a2e 0%, #16213e 100%);
-      min-height: 100vh;
-      padding: 20px;
-      color: #fff;
-    }
-    .container { max-width: 1200px; margin: 0 auto; }
-    h1 { margin-bottom: 10px; font-size: 28px; }
-    .subtitle { color: #888; margin-bottom: 30px; }
-    .panels { display: grid; grid-template-columns: 1fr 1fr; gap: 20px; }
-    @media (max-width: 900px) { .panels { grid-template-columns: 1fr; } }
-    .panel {
-      background: rgba(255,255,255,0.05);
-      border: 1px solid rgba(255,255,255,0.1);
-      border-radius: 12px;
-      padding: 24px;
-    }
-    .panel h2 {
-      margin-bottom: 20px;
-      font-size: 18px;
-      display: flex;
-      align-items: center;
-      gap: 10px;
-    }
-    .panel h2 .icon { font-size: 24px; }
-    .form-group { margin-bottom: 16px; }
-    label {
-      display: block;
-      margin-bottom: 6px;
-      font-size: 13px;
-      color: #aaa;
-      font-weight: 500;
-    }
-    input, textarea {
-      width: 100%;
-      padding: 12px;
-      background: rgba(0,0,0,0.3);
-      border: 1px solid rgba(255,255,255,0.15);
-      border-radius: 8px;
-      color: #fff;
-      font-size: 14px;
-    }
-    input:focus, textarea:focus {
-      outline: none;
-      border-color: #4CAF50;
-    }
-    textarea {
-      min-height: 120px;
-      font-family: 'Monaco', 'Menlo', monospace;
-      font-size: 12px;
-    }
-    button {
-      width: 100%;
-      padding: 14px;
-      border: none;
-      border-radius: 8px;
-      font-size: 15px;
-      font-weight: 600;
-      cursor: pointer;
-      transition: transform 0.1s, box-shadow 0.2s;
-    }
-    button:hover { transform: translateY(-1px); }
-    button:active { transform: translateY(0); }
-    button:disabled { opacity: 0.5; cursor: not-allowed; transform: none; }
-    .btn-github {
-      background: linear-gradient(135deg, #24292e 0%, #1a1e22 100%);
-      color: white;
-      border: 1px solid #444;
-    }
-    .btn-da {
-      background: linear-gradient(135deg, #eb1000 0%, #c40d00 100%);
-      color: white;
-    }
-    .result {
-      margin-top: 16px;
-      padding: 16px;
-      border-radius: 8px;
-      font-size: 13px;
-      display: none;
-    }
-    .result.success {
-      display: block;
-      background: rgba(76, 175, 80, 0.2);
-      border: 1px solid #4CAF50;
-    }
-    .result.error {
-      display: block;
-      background: rgba(244, 67, 54, 0.2);
-      border: 1px solid #f44336;
-    }
-    .result a {
-      color: #4CAF50;
-      text-decoration: none;
-    }
-    .result a:hover { text-decoration: underline; }
-    pre {
-      background: rgba(0,0,0,0.3);
-      padding: 12px;
-      border-radius: 6px;
-      overflow-x: auto;
-      margin-top: 10px;
-      font-size: 11px;
-    }
-    .row { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
-  </style>
-</head>
-<body>
-  <div class="container">
-    <h1>Block Save Test UI</h1>
-    <p class="subtitle">Test /block-github and /block-da endpoints</p>
-
-    <div class="panels">
-      <!-- GitHub Panel -->
-      <div class="panel">
-        <h2><span class="icon">&#128025;</span> Push to GitHub</h2>
-        <form id="github-form">
-          <div class="row">
-            <div class="form-group">
-              <label>Owner</label>
-              <input type="text" id="gh-owner" value="paolomoz" required>
-            </div>
-            <div class="form-group">
-              <label>Repo</label>
-              <input type="text" id="gh-repo" value="neocat-2" required>
-            </div>
-          </div>
-          <div class="form-group">
-            <label>Site URL (generates branch name)</label>
-            <input type="text" id="gh-siteUrl" placeholder="https://www.example.com">
-          </div>
-          <div class="form-group">
-            <label>Block Name</label>
-            <input type="text" id="gh-blockName" value="my-block" required>
-          </div>
-          <div class="form-group">
-            <label>JavaScript</label>
-            <textarea id="gh-js" required>export default function decorate(block) {
-  block.classList.add('decorated');
-  console.log('Block decorated!');
-}</textarea>
-          </div>
-          <div class="form-group">
-            <label>CSS</label>
-            <textarea id="gh-css" required>.my-block {
-  padding: 2rem;
-  background: #f5f5f5;
-  border-radius: 8px;
-}</textarea>
-          </div>
-          <div class="form-group">
-            <label>GitHub Token</label>
-            <input type="password" id="gh-token" required>
-          </div>
-          <button type="submit" class="btn-github">Push to GitHub</button>
-          <div id="gh-result" class="result"></div>
-        </form>
-      </div>
-
-      <!-- DA Panel -->
-      <div class="panel">
-        <h2><span class="icon">&#128196;</span> Save to DA</h2>
-        <form id="da-form">
-          <div class="row">
-            <div class="form-group">
-              <label>Organization</label>
-              <input type="text" id="da-org" value="paolomoz" required>
-            </div>
-            <div class="form-group">
-              <label>Site</label>
-              <input type="text" id="da-site" value="neocat-2" required>
-            </div>
-          </div>
-          <div class="form-group">
-            <label>Path</label>
-            <input type="text" id="da-path" value="/drafts/test-block" required>
-          </div>
-          <div class="form-group">
-            <label>HTML Content</label>
-            <textarea id="da-html" required><body>
-<header></header>
-<main>
-  <div>
-    <div class="my-block">
-      <div>
-        <div>
-          <h1>Hello World</h1>
-          <p>This is a test block.</p>
-        </div>
-      </div>
-    </div>
-  </div>
-</main>
-<footer></footer>
-</body></textarea>
-          </div>
-          <button type="submit" class="btn-da">Save to DA</button>
-          <div id="da-result" class="result"></div>
-        </form>
-      </div>
-    </div>
-  </div>
-
-  <script>
-    const API_BASE = '';
-
-    // Check for pre-filled data from /test page
-    (function loadDataFromUrl() {
-      const params = new URLSearchParams(window.location.search);
-      const encodedData = params.get('data');
-      if (encodedData) {
-        try {
-          const data = JSON.parse(decodeURIComponent(escape(atob(encodedData))));
-
-          // Pre-fill GitHub form
-          if (data.blockName) document.getElementById('gh-blockName').value = data.blockName;
-          if (data.js) document.getElementById('gh-js').value = data.js;
-          if (data.css) document.getElementById('gh-css').value = data.css;
-          if (data.siteUrl) document.getElementById('gh-siteUrl').value = data.siteUrl;
-
-          // Pre-fill DA form with the HTML
-          if (data.html) document.getElementById('da-html').value = data.html;
-
-          // Update CSS block name to match
-          if (data.blockName) {
-            document.getElementById('gh-css').value = data.css.replace(/\\.my-block/g, '.' + data.blockName);
-          }
-        } catch (e) {
-          console.error('Failed to parse data from URL:', e);
-        }
-      }
-    })();
-
-    document.getElementById('github-form').addEventListener('submit', async (e) => {
-      e.preventDefault();
-      const btn = e.target.querySelector('button');
-      const result = document.getElementById('gh-result');
-      btn.disabled = true;
-      btn.textContent = 'Pushing...';
-      result.className = 'result';
-
-      try {
-        const body = {
-          owner: document.getElementById('gh-owner').value,
-          repo: document.getElementById('gh-repo').value,
-          blockName: document.getElementById('gh-blockName').value,
-          js: document.getElementById('gh-js').value,
-          css: document.getElementById('gh-css').value,
-          token: document.getElementById('gh-token').value,
-        };
-
-        const siteUrl = document.getElementById('gh-siteUrl').value;
-        if (siteUrl) body.siteUrl = siteUrl;
-
-        const res = await fetch(API_BASE + '/block-github', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify(body)
-        });
-
-        const data = await res.json();
-
-        if (data.success) {
-          result.className = 'result success';
-          result.innerHTML = \`
-            <strong>Success!</strong><br>
-            Branch: <code>\${data.branch}</code><br>
-            <a href="\${data.commitUrl}" target="_blank">View Commit &rarr;</a>
-            <pre>\${JSON.stringify(data, null, 2)}</pre>
-          \`;
-        } else {
-          result.className = 'result error';
-          result.innerHTML = \`<strong>Error:</strong> \${data.error}<pre>\${JSON.stringify(data, null, 2)}</pre>\`;
-        }
-      } catch (err) {
-        result.className = 'result error';
-        result.innerHTML = \`<strong>Error:</strong> \${err.message}\`;
-      }
-
-      btn.disabled = false;
-      btn.textContent = 'Push to GitHub';
-    });
-
-    document.getElementById('da-form').addEventListener('submit', async (e) => {
-      e.preventDefault();
-      const btn = e.target.querySelector('button');
-      const result = document.getElementById('da-result');
-      btn.disabled = true;
-      btn.textContent = 'Saving...';
-      result.className = 'result';
-
-      try {
-        const res = await fetch(API_BASE + '/block-da', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            org: document.getElementById('da-org').value,
-            site: document.getElementById('da-site').value,
-            path: document.getElementById('da-path').value,
-            html: document.getElementById('da-html').value,
-          })
-        });
-
-        const data = await res.json();
-
-        if (data.success) {
-          result.className = 'result success';
-          result.innerHTML = \`
-            <strong>Success!</strong><br>
-            <a href="\${data.pageUrl}" target="_blank">Open in DA &rarr;</a><br>
-            <a href="\${data.previewUrl}" target="_blank">Preview &rarr;</a>
-            <pre>\${JSON.stringify(data, null, 2)}</pre>
-          \`;
-        } else {
-          result.className = 'result error';
-          result.innerHTML = \`<strong>Error:</strong> \${data.error}<pre>\${JSON.stringify(data, null, 2)}</pre>\`;
-        }
-      } catch (err) {
-        result.className = 'result error';
-        result.innerHTML = \`<strong>Error:</strong> \${err.message}\`;
-      }
-
-      btn.disabled = false;
-      btn.textContent = 'Save to DA';
-    });
-  </script>
-</body>
-</html>`;
-
-  return new Response(html, {
-    headers: {
-      'Content-Type': 'text/html; charset=utf-8',
-    },
-  });
-}
-
-/**
  * Returns the test UI HTML page with block generation and design system import
  */
 function handleTestUI(env: Env): Response {
@@ -6234,6 +6509,45 @@ async function ensureBranchExists(
 }
 
 /**
+ * Get file contents from a specific branch
+ * Returns null if file doesn't exist
+ */
+async function getFileFromBranch(
+  githubFetch: (url: string, options?: RequestInit) => Promise<Response>,
+  owner: string,
+  repo: string,
+  branch: string,
+  path: string
+): Promise<string | null> {
+  const response = await githubFetch(
+    `https://api.github.com/repos/${owner}/${repo}/contents/${path}?ref=${branch}`
+  );
+
+  if (response.status === 404) {
+    return null;
+  }
+
+  if (!response.ok) {
+    const error = await response.text();
+    throw new BlockGeneratorError(
+      `Failed to get file ${path} from branch ${branch}: ${response.status} - ${error}`,
+      'GITHUB_API_ERROR',
+      response.status
+    );
+  }
+
+  const data = await response.json() as { content: string; encoding: string };
+  if (data.encoding !== 'base64') {
+    throw new BlockGeneratorError(
+      `Unexpected encoding for file ${path}: ${data.encoding}`,
+      'GITHUB_API_ERROR'
+    );
+  }
+
+  return atob(data.content);
+}
+
+/**
  * Push files to a branch in a single commit
  */
 async function pushFilesToBranch(
@@ -7334,6 +7648,120 @@ async function handleDesignSystemImport(request: Request, env: Env): Promise<Res
         console.error('Failed to close browser:', e);
       }
     }
+  }
+}
+
+/**
+ * Handles /design-system-finalize endpoint
+ * Merges design system branch to main
+ */
+async function handleDesignSystemFinalize(request: Request, env: Env): Promise<Response> {
+  try {
+    interface DesignSystemFinalizeRequest {
+      branch: string;
+      github: {
+        owner: string;
+        repo: string;
+        token?: string;
+      };
+    }
+
+    const body = await request.json() as DesignSystemFinalizeRequest;
+
+    // Validate required fields
+    const missing: string[] = [];
+    if (!body.branch) missing.push('branch');
+    if (!body.github?.owner) missing.push('github.owner');
+    if (!body.github?.repo) missing.push('github.repo');
+
+    // GitHub token: use request token or fall back to env
+    const githubToken = body.github?.token || env.GITHUB_TOKEN;
+    if (!githubToken) missing.push('github.token (or GITHUB_TOKEN env)');
+
+    if (missing.length > 0) {
+      throw new BlockGeneratorError(
+        `Missing required fields: ${missing.join(', ')}`,
+        'INVALID_REQUEST',
+        400
+      );
+    }
+
+    const { owner, repo } = body.github;
+    const branch = body.branch;
+
+    console.log(`Finalizing design system: merging ${branch} to main`);
+
+    const githubFetch = createGitHubFetcher(githubToken);
+    const GITHUB_API = 'https://api.github.com';
+
+    // Get the branch reference to merge
+    const branchRefRes = await githubFetch(`${GITHUB_API}/repos/${owner}/${repo}/git/ref/heads/${branch}`);
+    if (!branchRefRes.ok) {
+      throw new BlockGeneratorError(
+        `Branch ${branch} not found`,
+        'BRANCH_NOT_FOUND',
+        404
+      );
+    }
+    const branchRef = await branchRefRes.json() as { object: { sha: string } };
+    const branchSha = branchRef.object.sha;
+
+    // Merge branch into main using merge API
+    const mergeRes = await githubFetch(`${GITHUB_API}/repos/${owner}/${repo}/merges`, {
+      method: 'POST',
+      body: JSON.stringify({
+        base: 'main',
+        head: branch,
+        commit_message: `Merge design system from ${branch}`,
+      }),
+    });
+
+    if (!mergeRes.ok) {
+      const errorBody = await mergeRes.json().catch(() => ({})) as { message?: string };
+      throw new BlockGeneratorError(
+        `Merge failed: ${errorBody.message || mergeRes.statusText}`,
+        'MERGE_FAILED',
+        mergeRes.status
+      );
+    }
+
+    const mergeResult = await mergeRes.json() as { sha: string; html_url?: string };
+
+    // Delete the preview branch after successful merge
+    try {
+      await githubFetch(`${GITHUB_API}/repos/${owner}/${repo}/git/refs/heads/${branch}`, {
+        method: 'DELETE',
+      });
+      console.log(`Deleted branch: ${branch}`);
+    } catch (e) {
+      console.warn(`Failed to delete branch ${branch}:`, e);
+    }
+
+    console.log(`Successfully merged design system to main: ${mergeResult.sha}`);
+
+    return Response.json({
+      success: true,
+      merged: {
+        sha: mergeResult.sha,
+        commitUrl: mergeResult.html_url || `https://github.com/${owner}/${repo}/commit/${mergeResult.sha}`,
+        into: 'main',
+      },
+    }, { headers: corsHeaders(env) });
+
+  } catch (error) {
+    console.error('Design system finalize error:', error);
+
+    if (error instanceof BlockGeneratorError) {
+      return Response.json(
+        { success: false, error: error.message, code: error.code },
+        { status: error.statusCode, headers: corsHeaders(env) }
+      );
+    }
+
+    return Response.json(
+      { success: false, error: String(error), code: 'INTERNAL_ERROR' },
+      { status: 500, headers: corsHeaders(env) }
+    );
   }
 }
 

@@ -373,17 +373,41 @@ ${contentSummary}
 ${cssSection}
 ## EDS Block Requirements
 
-HTML structure:
+HTML structure - ONE ROW = ONE ITEM (card, slide, etc.):
 \`\`\`html
 <div class="{block-name}">
-  <div><!-- row 1 -->
+  <div><!-- row 1 = item 1 -->
+    <div><!-- cell 1: image --></div>
+    <div><!-- cell 2: title --></div>
+    <div><!-- cell 3: description --></div>
+    <div><!-- cell 4: link --></div>
+  </div>
+  <div><!-- row 2 = item 2 -->
     <div><!-- cell 1 --></div>
     <div><!-- cell 2 --></div>
+    <div><!-- cell 3 --></div>
+    <div><!-- cell 4 --></div>
   </div>
 </div>
 \`\`\`
 
-The JS decoration function transforms this into the final rendered structure.
+CRITICAL: Each row is ONE complete content item. Cells within a row are that item's properties.
+The JS decorate function iterates block.children as ROWS, each row.children are CELLS.
+
+JS Pattern (MUST follow this):
+\`\`\`js
+export default function decorate(block) {
+  [...block.children].forEach((row) => {
+    const cells = [...row.children];
+    // cells[0] = first property (e.g., image)
+    // cells[1] = second property (e.g., title)
+    row.classList.add('item');
+    if (cells[0]) cells[0].classList.add('item-image');
+    if (cells[1]) cells[1].classList.add('item-title');
+  });
+}
+\`\`\`
+DO NOT clear innerHTML. DO NOT expect multiple rows per item. DO NOT use type/value pairs.
 
 ## Critical Instructions
 
@@ -400,6 +424,16 @@ The JS decoration function transforms this into the final rendered structure.
    - Example: <img data-img-ref="1" alt="Logo">
    - NEVER write src="..." - I will inject real URLs
    - NEVER invent, guess, or use placeholder URLs
+7. **CTA/LINK STYLING - CRITICAL**: EDS renders isolated <a> tags as buttons by default (with background, padding, border-radius).
+   - Look at the original screenshot: are CTAs styled as BUTTONS or TEXT LINKS?
+   - If the original shows TEXT LINKS (no background, just colored text with maybe an arrow):
+     Your CSS MUST override EDS defaults: background: none; border: none; padding: 0; border-radius: 0;
+   - If the original shows BUTTONS with backgrounds, match that exact background color.
+   - ALWAYS match the original visual appearance, not EDS defaults.
+8. **BACKGROUND COLORS - CRITICAL**: Be conservative with backgrounds.
+   - If the section background appears WHITE or very light/neutral in the screenshot, use: background-color: white; or background: transparent;
+   - Do NOT add tinted backgrounds (lavender, pink, cream) unless they are CLEARLY visible in the original.
+   - When in doubt, use white or transparent - not a guessed color.
 
 ## Return Format
 

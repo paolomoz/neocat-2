@@ -1,0 +1,760 @@
+/**
+ * AEM Block Importer - Full Sidebar Styles
+ */
+
+/* Sidebar Container */
+#aem-importer-sidebar {
+  position: fixed;
+  top: 0;
+  right: -400px;
+  width: 380px;
+  height: 100vh;
+  background: #fff;
+  box-shadow: -4px 0 20px rgba(0, 0, 0, 0.15);
+  z-index: 2147483647;
+  display: flex;
+  flex-direction: column;
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+  font-size: 13px;
+  line-height: 1.4;
+  color: #1a1a1a;
+  transition: right 0.3s ease;
+}
+
+#aem-importer-sidebar.aem-visible {
+  right: 0;
+}
+
+#aem-importer-sidebar * {
+  box-sizing: border-box;
+}
+
+body.aem-sidebar-open {
+  margin-right: 380px;
+  transition: margin-right 0.3s ease;
+}
+
+/* Header */
+.aem-sidebar-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 14px 16px;
+  background: #0f172a;
+  color: #fff;
+  flex-shrink: 0;
+}
+
+.aem-sidebar-header h2 {
+  margin: 0;
+  font-size: 15px;
+  font-weight: 600;
+}
+
+.aem-sidebar-close {
+  background: transparent;
+  border: none;
+  color: #94a3b8;
+  font-size: 24px;
+  cursor: pointer;
+  padding: 0;
+  line-height: 1;
+}
+
+.aem-sidebar-close:hover {
+  color: #fff;
+}
+
+/* Content */
+.aem-sidebar-content {
+  flex: 1;
+  overflow-y: auto;
+  padding: 16px;
+}
+
+.aem-sidebar-url {
+  font-size: 12px;
+  color: #64748b;
+  margin-bottom: 16px;
+  padding-bottom: 12px;
+  border-bottom: 1px solid #e2e8f0;
+  word-break: break-all;
+}
+
+/* Views */
+.aem-view {
+  display: block;
+}
+
+.aem-view.aem-hidden {
+  display: none;
+}
+
+/* Form Groups */
+.aem-form-group {
+  margin-bottom: 16px;
+}
+
+.aem-form-group label {
+  display: block;
+  font-size: 12px;
+  font-weight: 600;
+  margin-bottom: 6px;
+  color: #374151;
+}
+
+.aem-form-group input[type="text"] {
+  width: 100%;
+  padding: 10px 12px;
+  border: 1px solid #d1d5db;
+  border-radius: 6px;
+  font-size: 13px;
+  font-family: inherit;
+}
+
+.aem-form-group input[type="text"]:focus {
+  outline: none;
+  border-color: #3b82f6;
+  box-shadow: 0 0 0 3px rgba(59, 130, 246, 0.15);
+}
+
+.aem-form-group small {
+  display: block;
+  margin-top: 4px;
+  font-size: 11px;
+  color: #9ca3af;
+}
+
+/* Buttons */
+.aem-btn {
+  padding: 10px 16px;
+  border: none;
+  border-radius: 6px;
+  font-size: 13px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: background 0.2s, opacity 0.2s;
+}
+
+.aem-btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.aem-btn-primary {
+  background: #3b82f6;
+  color: #fff;
+}
+
+.aem-btn-primary:hover:not(:disabled) {
+  background: #2563eb;
+}
+
+.aem-btn-secondary {
+  background: #e5e7eb;
+  color: #374151;
+}
+
+.aem-btn-secondary:hover:not(:disabled) {
+  background: #d1d5db;
+}
+
+.aem-btn-full {
+  width: 100%;
+}
+
+.aem-icon-btn {
+  width: 32px;
+  height: 32px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: #f3f4f6;
+  border: none;
+  border-radius: 6px;
+  color: #6b7280;
+  cursor: pointer;
+  font-size: 14px;
+}
+
+.aem-icon-btn:hover {
+  background: #e5e7eb;
+  color: #374151;
+}
+
+/* Status */
+.aem-status {
+  padding: 10px 12px;
+  border-radius: 6px;
+  font-size: 12px;
+  margin-top: 12px;
+}
+
+.aem-status.aem-hidden {
+  display: none;
+}
+
+.aem-status.aem-success {
+  background: #dcfce7;
+  color: #166534;
+}
+
+.aem-status.aem-error {
+  background: #fee2e2;
+  color: #991b1b;
+}
+
+/* Dashboard Actions */
+.aem-dashboard-actions {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-bottom: 20px;
+}
+
+.aem-action-btn {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 12px;
+  background: #f8fafc;
+  border: 1px solid #e2e8f0;
+  border-radius: 8px;
+  cursor: pointer;
+  text-align: left;
+  transition: background 0.2s, border-color 0.2s;
+}
+
+.aem-action-btn:hover {
+  background: #f1f5f9;
+  border-color: #cbd5e1;
+}
+
+.aem-action-icon {
+  font-size: 24px;
+  width: 40px;
+  text-align: center;
+}
+
+.aem-action-text {
+  flex: 1;
+}
+
+.aem-action-text strong {
+  display: block;
+  font-size: 14px;
+  color: #1e293b;
+  margin-bottom: 2px;
+}
+
+.aem-action-text small {
+  font-size: 12px;
+  color: #64748b;
+}
+
+/* Block Library */
+.aem-block-library {
+  margin-top: 16px;
+  padding-top: 16px;
+  border-top: 1px solid #e2e8f0;
+}
+
+.aem-library-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 8px;
+  font-weight: 600;
+  color: #374151;
+}
+
+.aem-block-list {
+  max-height: 150px;
+  overflow-y: auto;
+  border: 1px solid #e2e8f0;
+  border-radius: 6px;
+  background: #f8fafc;
+}
+
+.aem-block-item {
+  padding: 8px 12px;
+  border-bottom: 1px solid #e2e8f0;
+  font-size: 13px;
+}
+
+.aem-block-item:last-child {
+  border-bottom: none;
+}
+
+.aem-empty-library {
+  padding: 16px;
+  text-align: center;
+  color: #9ca3af;
+  font-size: 12px;
+}
+
+/* Selection View */
+.aem-selection-info {
+  text-align: center;
+  padding: 40px 20px;
+}
+
+.aem-selection-icon {
+  font-size: 48px;
+  margin-bottom: 16px;
+}
+
+.aem-selection-info h3 {
+  margin: 0 0 8px 0;
+  font-size: 18px;
+  color: #1e293b;
+}
+
+.aem-selection-info p {
+  margin: 0;
+  color: #64748b;
+  line-height: 1.6;
+}
+
+.aem-selection-hint {
+  margin-top: 16px !important;
+  font-size: 11px;
+  color: #94a3b8;
+}
+
+.aem-selection-hint kbd {
+  display: inline-block;
+  padding: 2px 6px;
+  background: #e2e8f0;
+  border: 1px solid #cbd5e1;
+  border-radius: 4px;
+  font-family: inherit;
+  font-size: 10px;
+  color: #475569;
+}
+
+/* Generating View */
+.aem-generating-header {
+  text-align: center;
+  margin-bottom: 20px;
+  font-size: 14px;
+  color: #64748b;
+}
+
+.aem-generating-header strong {
+  display: block;
+  font-size: 16px;
+  color: #1e293b;
+  margin-top: 4px;
+}
+
+.aem-progress-bar {
+  height: 8px;
+  background: #e2e8f0;
+  border-radius: 4px;
+  overflow: hidden;
+  margin-bottom: 8px;
+}
+
+.aem-progress-fill {
+  height: 100%;
+  background: #3b82f6;
+  border-radius: 4px;
+  transition: width 0.3s ease;
+  width: 0%;
+}
+
+.aem-progress-percent {
+  text-align: center;
+  font-size: 12px;
+  color: #64748b;
+  margin-bottom: 20px;
+}
+
+.aem-progress-steps {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.aem-step {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  font-size: 13px;
+  color: #9ca3af;
+}
+
+.aem-step-icon {
+  width: 20px;
+  text-align: center;
+  font-size: 14px;
+}
+
+.aem-step.aem-active {
+  color: #3b82f6;
+}
+
+.aem-step.aem-active .aem-step-icon {
+  animation: pulse 1s infinite;
+}
+
+.aem-step.aem-complete {
+  color: #16a34a;
+}
+
+@keyframes pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.5; }
+}
+
+/* Preview View */
+.aem-preview-header {
+  margin-bottom: 16px;
+  font-size: 14px;
+  color: #64748b;
+}
+
+.aem-preview-header strong {
+  display: block;
+  font-size: 16px;
+  color: #1e293b;
+  margin-top: 4px;
+}
+
+.aem-preview-url {
+  margin-bottom: 16px;
+  padding: 12px;
+  background: #f8fafc;
+  border-radius: 6px;
+}
+
+.aem-preview-url label {
+  display: block;
+  font-size: 11px;
+  color: #64748b;
+  margin-bottom: 4px;
+}
+
+.aem-preview-link {
+  color: #3b82f6;
+  text-decoration: none;
+  font-size: 12px;
+  word-break: break-all;
+}
+
+.aem-preview-link:hover {
+  text-decoration: underline;
+}
+
+/* Code Section */
+.aem-code-section {
+  margin-bottom: 16px;
+}
+
+.aem-code-tabs {
+  display: flex;
+  gap: 4px;
+  margin-bottom: 8px;
+  align-items: center;
+}
+
+.aem-code-tab {
+  padding: 6px 12px;
+  border: none;
+  background: #e5e7eb;
+  border-radius: 4px;
+  font-size: 12px;
+  cursor: pointer;
+  color: #6b7280;
+}
+
+.aem-code-tab.active {
+  background: #3b82f6;
+  color: #fff;
+}
+
+.aem-code-tabs .aem-icon-btn {
+  margin-left: auto;
+}
+
+.aem-code-content {
+  background: #1e293b;
+  color: #e2e8f0;
+  padding: 12px;
+  border-radius: 6px;
+  font-family: 'Monaco', 'Menlo', monospace;
+  font-size: 11px;
+  max-height: 200px;
+  overflow: auto;
+  white-space: pre-wrap;
+  word-break: break-all;
+  margin: 0;
+}
+
+.aem-preview-actions {
+  display: flex;
+  gap: 8px;
+}
+
+.aem-preview-actions .aem-btn {
+  flex: 1;
+}
+
+/* Page Import View */
+.aem-page-import-header {
+  font-size: 14px;
+  color: #64748b;
+  margin-bottom: 16px;
+  padding-bottom: 12px;
+  border-bottom: 1px solid #e2e8f0;
+}
+
+.aem-page-import-header span {
+  color: #1e293b;
+  font-weight: 500;
+}
+
+.aem-section-list-container {
+  margin-bottom: 12px;
+}
+
+.aem-section-list-container > label {
+  display: block;
+  font-weight: 600;
+  margin-bottom: 8px;
+  color: #374151;
+  font-size: 13px;
+}
+
+.aem-section-list {
+  max-height: 300px;
+  overflow-y: auto;
+  border: 1px solid #e2e8f0;
+  border-radius: 8px;
+  background: #f8fafc;
+  margin-bottom: 12px;
+}
+
+.aem-empty-sections {
+  padding: 24px 16px;
+  text-align: center;
+  color: #94a3b8;
+  font-size: 12px;
+}
+
+.aem-section-item {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 12px;
+  border-bottom: 1px solid #e2e8f0;
+  background: #fff;
+}
+
+.aem-section-item:last-child {
+  border-bottom: none;
+}
+
+.aem-section-info {
+  flex: 1;
+  min-width: 0;
+}
+
+.aem-section-name {
+  display: block;
+  font-weight: 500;
+  color: #1f2937;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.aem-section-type {
+  display: block;
+  font-size: 11px;
+  color: #6b7280;
+  margin-top: 2px;
+}
+
+.aem-section-actions {
+  display: flex;
+  gap: 4px;
+  margin-left: 8px;
+}
+
+.aem-section-actions .aem-icon-btn {
+  width: 28px;
+  height: 28px;
+  font-size: 12px;
+}
+
+/* Section Editor */
+.aem-section-editor {
+  padding: 16px;
+  background: #f8fafc;
+  border: 1px solid #e2e8f0;
+  border-radius: 8px;
+  margin-top: 12px;
+}
+
+.aem-section-editor.aem-hidden {
+  display: none;
+}
+
+.aem-section-editor h3 {
+  margin: 0 0 12px 0;
+  font-size: 14px;
+  font-weight: 600;
+  color: #1f2937;
+}
+
+.aem-block-options {
+  max-height: 150px;
+  overflow-y: auto;
+}
+
+.aem-block-option {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px;
+  background: #fff;
+  border: 1px solid #e2e8f0;
+  border-radius: 4px;
+  margin-bottom: 4px;
+  cursor: pointer;
+  font-size: 13px;
+}
+
+.aem-block-option:hover {
+  background: #f8fafc;
+}
+
+.aem-block-option input {
+  margin: 0;
+}
+
+.aem-editor-actions {
+  display: flex;
+  gap: 8px;
+  margin-top: 12px;
+}
+
+.aem-editor-actions .aem-btn {
+  flex: 1;
+}
+
+/* Design Import View */
+.aem-design-status {
+  text-align: center;
+  font-size: 14px;
+  color: #64748b;
+  margin-bottom: 16px;
+}
+
+.aem-spinner {
+  width: 32px;
+  height: 32px;
+  border: 3px solid #e2e8f0;
+  border-top-color: #3b82f6;
+  border-radius: 50%;
+  margin: 0 auto 16px;
+  animation: spin 1s linear infinite;
+}
+
+@keyframes spin {
+  to { transform: rotate(360deg); }
+}
+
+.aem-design-tokens {
+  margin-bottom: 16px;
+}
+
+.aem-design-tokens.aem-hidden {
+  display: none;
+}
+
+.aem-token-section {
+  margin-bottom: 16px;
+}
+
+.aem-token-section label {
+  display: block;
+  font-weight: 600;
+  font-size: 12px;
+  color: #374151;
+  margin-bottom: 8px;
+}
+
+.aem-token-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.aem-token-item {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 8px;
+  background: #f8fafc;
+  border: 1px solid #e2e8f0;
+  border-radius: 4px;
+  font-size: 11px;
+}
+
+.aem-token-color {
+  width: 16px;
+  height: 16px;
+  border-radius: 3px;
+  border: 1px solid rgba(0,0,0,0.1);
+}
+
+/* Footer */
+.aem-sidebar-footer {
+  display: flex;
+  gap: 8px;
+  padding: 12px 16px;
+  border-top: 1px solid #e2e8f0;
+  background: #f8fafc;
+  flex-shrink: 0;
+}
+
+.aem-sidebar-footer .aem-btn {
+  flex: 1;
+}
+
+.aem-sidebar-footer .aem-btn.aem-hidden {
+  display: none;
+}
+
+/* Selection Overlay */
+.aem-selection-overlay {
+  position: absolute;
+  background: rgba(59, 130, 246, 0.2);
+  border: 2px solid #3b82f6;
+  border-radius: 4px;
+  pointer-events: none;
+  z-index: 2147483646;
+  display: none;
+}
+
+.aem-selection-tooltip {
+  position: absolute;
+  background: #1e293b;
+  color: #fff;
+  padding: 4px 8px;
+  border-radius: 4px;
+  font-size: 11px;
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+  white-space: nowrap;
+  pointer-events: none;
+  z-index: 2147483646;
+  display: none;
+}
+
+/* Utility */
+.aem-hidden {
+  display: none !important;
+}

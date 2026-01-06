@@ -3,6 +3,7 @@ coverage/*
 logs/*
 node_modules/*
 workers/block-generator/node_modules/*
+workers/block-collector/node_modules/*
 .claude/skills/scrape-webpage/scripts/node_modules/*
 import-work/images/*
 
@@ -14,3 +15,4 @@ helix-importer-ui
 .idea
 .env
 .env.swp
+.dev.vars

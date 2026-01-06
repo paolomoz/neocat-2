@@ -1,0 +1,90 @@
+/**
+ * AEM Block Importer - Element Selection Overlay Styles
+ */
+
+/* Active state cursor */
+body.aem-block-importer-active {
+  cursor: crosshair !important;
+}
+
+body.aem-block-importer-active * {
+  cursor: crosshair !important;
+}
+
+/* Hover overlay */
+.aem-block-importer-overlay {
+  position: absolute;
+  pointer-events: none;
+  border: 2px dashed #3b82f6;
+  background: rgba(59, 130, 246, 0.08);
+  z-index: 2147483646;
+  box-sizing: border-box;
+  transition: all 0.1s ease;
+  display: none;
+}
+
+/* Selected state */
+.aem-block-importer-overlay.selected {
+  border: 3px solid #22c55e;
+  background: rgba(34, 197, 94, 0.12);
+  animation: aem-pulse 0.3s ease;
+}
+
+@keyframes aem-pulse {
+  0% {
+    transform: scale(1);
+    opacity: 1;
+  }
+  50% {
+    transform: scale(1.01);
+    opacity: 0.8;
+  }
+  100% {
+    transform: scale(1);
+    opacity: 1;
+  }
+}
+
+/* Element info tooltip */
+.aem-block-importer-tooltip {
+  position: absolute;
+  pointer-events: none;
+  background: #1e293b;
+  color: #f1f5f9;
+  padding: 4px 8px;
+  border-radius: 4px;
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+  font-size: 11px;
+  font-weight: 500;
+  line-height: 1.4;
+  z-index: 2147483647;
+  white-space: nowrap;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.2);
+  display: none;
+}
+
+/* Corner indicators */
+.aem-block-importer-overlay::before,
+.aem-block-importer-overlay::after {
+  content: '';
+  position: absolute;
+  width: 8px;
+  height: 8px;
+  background: #3b82f6;
+  border-radius: 1px;
+}
+
+.aem-block-importer-overlay::before {
+  top: -4px;
+  left: -4px;
+}
+
+.aem-block-importer-overlay::after {
+  bottom: -4px;
+  right: -4px;
+}
+
+.aem-block-importer-overlay.selected::before,
+.aem-block-importer-overlay.selected::after {
+  background: #22c55e;
+}

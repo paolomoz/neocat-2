@@ -5,8 +5,7 @@ compatibility_flags = ["nodejs_compat"]
 
 [vars]
 ALLOWED_ORIGINS = "*"
-# Seed developers for GitHub discovery (top EDS contributors)
-SEED_DEVELOPERS = "davidnuescheler,trieloff,rofe,fkakatie,kptdobe,ramboz,tripodsan,dominique-pfister,dylandepass,mhaack"
+# Developers are discovered dynamically from key Adobe repo contributors
 
 # Browser Rendering for screenshots
 [browser]
@@ -16,16 +15,16 @@ binding = "BROWSER"
 [[d1_databases]]
 binding = "DB"
 database_name = "block-database"
-database_id = "placeholder-create-with-wrangler-d1-create"
+database_id = "8c2c1f69-5514-4346-9c15-fd3f56d35390"
 
 # R2 Bucket for blob storage (screenshots, HTML, CSS)
 [[r2_buckets]]
 binding = "BUCKET"
 bucket_name = "block-assets"
 
-# Weekly cron trigger for discovery and crawling
+# Cron triggers for discovery and crawling
 [triggers]
-crons = ["0 2 * * 0"]  # Every Sunday at 2AM UTC
+crons = ["0 * * * *", "0 2 * * SUN"]  # Every hour + Weekly discovery on Sunday 2AM UTC
 
 # Environment-specific secrets (set via wrangler secret put):
 # - GITHUB_TOKEN: Personal access token for GitHub API
