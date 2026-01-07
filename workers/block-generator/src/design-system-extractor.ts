@@ -61,18 +61,25 @@ export async function extractComputedStyles(page: Page): Promise<ComputedDesign>
       linkButton: null,
     };
 
-    // Look for common button patterns
+    // Look for common button patterns - expanded to catch more variants
     const primarySelectors = [
       'button.primary', '.btn-primary', 'button[type="submit"]', '.cta',
       'a.button', '.button', '[class*="btn-primary"]', '[class*="button-primary"]',
-      'button:not(.secondary):not(.outline)', 'a[class*="cta"]'
+      'button:not(.secondary):not(.outline)', 'a[class*="cta"]',
+      // Additional common patterns
+      '.btn', 'a.btn', '[class*="btn-blue"]', '[class*="btn-main"]',
+      '[class*="button-blue"]', '[class*="button-main"]',
+      '[class*="btn-action"]', '[class*="button-action"]',
+      'a[class*="button"]', 'main a[class*="btn"]', 'section a[class*="btn"]'
     ];
     const secondarySelectors = [
       'button.secondary', '.btn-secondary', '.btn-outline', 'button.outline',
-      '[class*="btn-secondary"]', '[class*="button-secondary"]', '[class*="btn-outline"]'
+      '[class*="btn-secondary"]', '[class*="button-secondary"]', '[class*="btn-outline"]',
+      '[class*="btn-ghost"]', '[class*="button-ghost"]', '[class*="btn-white"]'
     ];
     const linkButtonSelectors = [
-      'a.link-button', '.text-link', '[class*="link-button"]', 'a[class*="arrow"]'
+      'a.link-button', '.text-link', '[class*="link-button"]', 'a[class*="arrow"]',
+      '[class*="text-link"]', '[class*="link-cta"]'
     ];
 
     const buttonProps = [

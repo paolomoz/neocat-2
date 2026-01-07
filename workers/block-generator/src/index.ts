@@ -861,6 +861,7 @@ DESCRIPTION: ${sectionDescription}
 3. **MATCH THE VISUAL DESIGN** from the screenshot - colors, fonts, layout, spacing
 4. The generated block MUST contain the same content as the original - same headings, same paragraphs, same links
 5. **NO WRAPPER BACKGROUNDS** - Do NOT add background-color to .{block-name}-wrapper selectors. EDS wraps blocks automatically. Only style the block element itself and its children.
+6. **BUTTON COLORS**: Extract the EXACT button background-color from the HTML/CSS. DO NOT guess colors from screenshots - use the actual hex values from inline styles or class definitions in the extracted HTML.
 
 ## EXTRACTED HTML FROM THE PAGE (this is the actual content - use it!)
 
@@ -902,8 +903,8 @@ The **CSS** styles the **rendered output** (what decorate() produces), NOT the a
 
 - Style ONLY the block class and its children: .{block-name}, .{block-name} .child-element
 - NEVER style -wrapper or -container selectors (EDS adds these automatically)
-- NEVER add background-color to wrapper elements
-- Keep backgrounds transparent unless the ORIGINAL design clearly has a colored section background
+- **NO BLOCK BACKGROUNDS**: Do NOT add background-color to the block itself. Section backgrounds are controlled via section metadata, not block CSS. Use background: transparent; or omit background entirely.
+- The ONLY exception for backgrounds: internal elements like card items within the block (e.g., .card-item { background: #fff; })
 
 ## Return Format
 
@@ -7115,6 +7116,7 @@ async function cleanupGenerationSession(
 
 /**
  * Handles errors and returns appropriate response
+ * Now includes actual error message for easier debugging
  */
 function handleError(error: unknown, env: Env): Response {
   if (error instanceof BlockGeneratorError) {
@@ -7130,12 +7132,18 @@ function handleError(error: unknown, env: Env): Response {
     });
   }
 
-  // Unknown error
-  console.error('Unexpected error:', error);
+  // Unknown error - include actual message for debugging
+  const errorMessage = error instanceof Error ? error.message : String(error);
+  const errorStack = error instanceof Error ? error.stack : undefined;
+
+  console.error('Unexpected error:', errorMessage);
+  if (errorStack) {
+    console.error('Stack trace:', errorStack);
+  }
 
   const response: ErrorResponse = {
     success: false,
-    error: 'An unexpected error occurred',
+    error: errorMessage || 'An unexpected error occurred',
     code: 'INTERNAL_ERROR',
   };
 

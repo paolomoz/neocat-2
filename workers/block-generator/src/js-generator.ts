@@ -19,6 +19,8 @@ export function generateJS(analysis: LayoutAnalysis): string {
       return generateListJS(blockName);
     case 'accordion':
       return generateAccordionJS(blockName);
+    case 'carousel':
+      return generateCarouselJS(blockName);
     case 'text-only':
       return generateTextOnlyJS(blockName);
     case 'single-image':
@@ -243,6 +245,98 @@ export default function decorate(block) {
   if (caption && !caption.querySelector('picture')) {
     caption.classList.add('${blockName}-caption');
   }
+}
+`;
+}
+
+function generateCarouselJS(blockName: string): string {
+  return `export default function decorate(block) {
+  const slides = [...block.children];
+  if (slides.length === 0) return;
+
+  let currentSlide = 0;
+  const totalSlides = slides.length;
+
+  // Create carousel structure
+  const viewport = document.createElement('div');
+  viewport.className = '${blockName}-viewport';
+
+  const track = document.createElement('div');
+  track.className = '${blockName}-track';
+
+  // Move slides into track
+  slides.forEach((slide, index) => {
+    slide.classList.add('${blockName}-slide');
+    slide.setAttribute('data-slide-index', index.toString());
+    track.appendChild(slide);
+  });
+
+  viewport.appendChild(track);
+
+  // Create navigation
+  const nav = document.createElement('div');
+  nav.className = '${blockName}-nav';
+
+  const prevBtn = document.createElement('button');
+  prevBtn.className = '${blockName}-prev';
+  prevBtn.setAttribute('aria-label', 'Previous slide');
+  prevBtn.innerHTML = '&#8249;';
+
+  const nextBtn = document.createElement('button');
+  nextBtn.className = '${blockName}-next';
+  nextBtn.setAttribute('aria-label', 'Next slide');
+  nextBtn.innerHTML = '&#8250;';
+
+  // Create dots container
+  const dotsContainer = document.createElement('div');
+  dotsContainer.className = '${blockName}-dots';
+
+  slides.forEach((_, index) => {
+    const dot = document.createElement('button');
+    dot.className = '${blockName}-dot' + (index === 0 ? ' active' : '');
+    dot.setAttribute('aria-label', \`Go to slide \${index + 1}\`);
+    dot.addEventListener('click', () => goToSlide(index));
+    dotsContainer.appendChild(dot);
+  });
+
+  nav.appendChild(prevBtn);
+  nav.appendChild(dotsContainer);
+  nav.appendChild(nextBtn);
+
+  // Navigation functions
+  function updateDots() {
+    dotsContainer.querySelectorAll('.${blockName}-dot').forEach((dot, index) => {
+      dot.classList.toggle('active', index === currentSlide);
+    });
+  }
+
+  function goToSlide(index) {
+    currentSlide = ((index % totalSlides) + totalSlides) % totalSlides;
+    track.style.transform = \`translateX(-\${currentSlide * 100}%)\`;
+    updateDots();
+  }
+
+  function nextSlide() {
+    goToSlide(currentSlide + 1);
+  }
+
+  function prevSlide() {
+    goToSlide(currentSlide - 1);
+  }
+
+  // Event listeners
+  prevBtn.addEventListener('click', prevSlide);
+  nextBtn.addEventListener('click', nextSlide);
+
+  // Optional: keyboard navigation
+  block.setAttribute('tabindex', '0');
+  block.addEventListener('keydown', (e) => {
+    if (e.key === 'ArrowLeft') prevSlide();
+    if (e.key === 'ArrowRight') nextSlide();
+  });
+
+  // Replace block content
+  block.replaceChildren(viewport, nav);
 }
 `;
 }

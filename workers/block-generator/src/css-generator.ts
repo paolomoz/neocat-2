@@ -19,6 +19,8 @@ export function generateCSS(analysis: LayoutAnalysis): string {
       return generateListCSS(blockName);
     case 'accordion':
       return generateAccordionCSS(blockName);
+    case 'carousel':
+      return generateCarouselCSS(blockName);
     case 'text-only':
       return generateTextOnlyCSS(blockName);
     case 'single-image':
@@ -438,6 +440,116 @@ function generateSingleImageCSS(blockName: string): string {
   font-size: var(--body-font-size-s, 14px);
   color: var(--dark-color, #666);
   font-style: italic;
+}
+`;
+}
+
+function generateCarouselCSS(blockName: string): string {
+  return `/* ${blockName} block styles */
+.${blockName} {
+  padding: 40px 0;
+  position: relative;
+}
+
+.${blockName}-viewport {
+  overflow: hidden;
+  width: 100%;
+}
+
+.${blockName}-track {
+  display: flex;
+  transition: transform 0.3s ease-in-out;
+}
+
+.${blockName}-slide {
+  flex: 0 0 100%;
+  min-width: 100%;
+  padding: 0 16px;
+  box-sizing: border-box;
+}
+
+/* Slide content styling */
+.${blockName}-slide > div {
+  background-color: #fff;
+  border: 1px solid var(--light-color, #e0e0e0);
+  border-radius: 8px;
+  padding: 24px;
+  height: 100%;
+}
+
+/* Navigation container */
+.${blockName}-nav {
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  gap: 16px;
+  margin-top: 24px;
+}
+
+/* Prev/Next buttons */
+.${blockName}-prev,
+.${blockName}-next {
+  background: transparent;
+  border: 1px solid var(--light-color, #ccc);
+  border-radius: 50%;
+  width: 40px;
+  height: 40px;
+  font-size: 24px;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--text-color, #333);
+  transition: background-color 0.2s, border-color 0.2s;
+}
+
+.${blockName}-prev:hover,
+.${blockName}-next:hover {
+  background-color: var(--light-color, #f0f0f0);
+  border-color: var(--dark-color, #999);
+}
+
+/* Dots container */
+.${blockName}-dots {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+}
+
+/* Individual dots */
+.${blockName}-dot {
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  border: 1px solid var(--dark-color, #666);
+  background: transparent;
+  cursor: pointer;
+  padding: 0;
+  transition: background-color 0.2s, transform 0.2s;
+}
+
+.${blockName}-dot:hover {
+  transform: scale(1.2);
+}
+
+.${blockName}-dot.active {
+  background-color: var(--link-color, #3b63fb);
+  border-color: var(--link-color, #3b63fb);
+}
+
+/* Multi-slide carousel (shows multiple items) */
+@media (min-width: 900px) {
+  .${blockName}-slide {
+    flex: 0 0 33.333%;
+    min-width: 33.333%;
+  }
+}
+
+@media (min-width: 600px) and (max-width: 899px) {
+  .${blockName}-slide {
+    flex: 0 0 50%;
+    min-width: 50%;
+  }
 }
 `;
 }

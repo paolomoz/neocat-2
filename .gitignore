@@ -16,3 +16,5 @@ helix-importer-ui
 .env
 .env.swp
 .dev.vars
+
+.playwright-user-data/*

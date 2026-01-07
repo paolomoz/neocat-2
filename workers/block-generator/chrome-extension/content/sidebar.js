@@ -28,7 +28,10 @@
     PREVIEW: 'preview',
     PAGE_IMPORT: 'page-import',
     DESIGN_IMPORT: 'design-import',
+    MULTI_GENERATING: 'multi-generating',
   };
+
+  const MAX_PARALLEL_GENERATIONS = 5;
 
   // State
   let state = {
@@ -45,7 +48,15 @@
     designImport: null,
     // Selection
     isSelecting: false,
-    selectionMode: 'block', // 'block' or 'section'
+    selectionMode: 'block', // 'block', 'section', or 'multi'
+    // Multi-block generation
+    multiBlockGeneration: {
+      isSelecting: false,
+      generations: {},
+      generationOrder: [],
+      queue: [],
+      activeCount: 0,
+    },
   };
 
   let sidebar = null;
@@ -97,6 +108,7 @@
     sidebar.id = 'aem-importer-sidebar';
     sidebar.innerHTML = `
       <div class="aem-sidebar-header">
+        <button class="aem-sidebar-toggle" title="Collapse">▲</button>
         <h2>AEM Block Importer</h2>
         <button class="aem-sidebar-close" title="Close">&times;</button>
       </div>
@@ -117,11 +129,11 @@
           <div class="aem-sidebar-url" id="aem-current-url"></div>
 
           <div class="aem-dashboard-actions">
-            <button id="aem-select-block-btn" class="aem-action-btn">
-              <span class="aem-action-icon">&#129521;</span>
+            <button id="aem-select-blocks-btn" class="aem-action-btn">
+              <span class="aem-action-icon">&#128218;</span>
               <span class="aem-action-text">
-                <strong>Select Block</strong>
-                <small>Pick element to generate block</small>
+                <strong>Select Blocks</strong>
+                <small>Generate multiple blocks in parallel</small>
               </span>
             </button>
           </div>
@@ -262,6 +274,18 @@
             <button id="aem-accept-design" class="aem-btn aem-btn-primary">&#10003; Merge</button>
           </div>
         </div>
+
+        <!-- Multi-Block Generation View -->
+        <div id="aem-view-multi-generating" class="aem-view aem-hidden">
+          <div class="aem-multi-header">
+            <span>Generating <strong id="aem-multi-count">0</strong> blocks</span>
+            <small id="aem-multi-status">(select elements on page)</small>
+          </div>
+          <div id="aem-multi-accordion" class="aem-multi-accordion">
+            <div class="aem-multi-empty">Click elements on the page to start generating blocks</div>
+          </div>
+          <button id="aem-multi-done-btn" class="aem-btn aem-btn-secondary aem-btn-full">Done Selecting</button>
+        </div>
       </div>
 
       <!-- Footer -->
@@ -278,12 +302,16 @@
   function attachEventListeners() {
     // Header
     sidebar.querySelector('.aem-sidebar-close').addEventListener('click', hide);
+    sidebar.querySelector('.aem-sidebar-toggle').addEventListener('click', toggleCollapse);
 
     // Setup
     sidebar.querySelector('#aem-save-config').addEventListener('click', handleSaveConfig);
 
     // Dashboard
-    sidebar.querySelector('#aem-select-block-btn').addEventListener('click', () => startSelection('block'));
+    sidebar.querySelector('#aem-select-blocks-btn').addEventListener('click', startMultiSelection);
+
+    // Multi-block generation
+    sidebar.querySelector('#aem-multi-done-btn').addEventListener('click', cancelMultiSelection);
 
     // Selection
     sidebar.querySelector('#aem-cancel-selection').addEventListener('click', cancelSelection);
@@ -390,6 +418,18 @@
       document.body.classList.remove('aem-sidebar-open');
     }
     cancelSelection();
+  }
+
+  function toggleCollapse() {
+    if (!sidebar) return;
+
+    const isCollapsed = sidebar.classList.toggle('aem-collapsed');
+    const toggleBtn = sidebar.querySelector('.aem-sidebar-toggle');
+
+    if (toggleBtn) {
+      toggleBtn.innerHTML = isCollapsed ? '▼' : '▲';
+      toggleBtn.title = isCollapsed ? 'Expand' : 'Collapse';
+    }
   }
 
   // ============ Setup ============
@@ -1307,6 +1347,519 @@
     }
     state.designImport = null;
     showView(VIEWS.DASHBOARD);
+  }
+
+  // ============ Multi-Block Generation ============
+
+  function startMultiSelection() {
+    // Reset multi-block state
+    state.multiBlockGeneration = {
+      isSelecting: true,
+      generations: {},
+      generationOrder: [],
+      queue: [],
+      activeCount: 0,
+    };
+
+    // Show the multi-generating view
+    showView(VIEWS.MULTI_GENERATING);
+    renderMultiAccordion();
+
+    // Start selection mode
+    state.selectionMode = 'multi';
+    state.isSelecting = true;
+    createSelectionOverlay();
+    document.addEventListener('mousemove', handleMouseMove, true);
+    document.addEventListener('click', handleMultiClick, true);
+    document.addEventListener('keydown', handleMultiKeyDown, true);
+    document.addEventListener('keyup', handleKeyUp, true);
+  }
+
+  function cancelMultiSelection() {
+    state.multiBlockGeneration.isSelecting = false;
+    state.isSelecting = false;
+    state.selectionMode = 'block';
+
+    // Remove selection listeners
+    document.removeEventListener('mousemove', handleMouseMove, true);
+    document.removeEventListener('click', handleMultiClick, true);
+    document.removeEventListener('keydown', handleMultiKeyDown, true);
+    document.removeEventListener('keyup', handleKeyUp, true);
+
+    if (overlay) { overlay.remove(); overlay = null; }
+    if (tooltip) { tooltip.remove(); tooltip = null; }
+    currentElement = null;
+
+    // Update button text
+    const doneBtn = sidebar.querySelector('#aem-multi-done-btn');
+    if (doneBtn) {
+      doneBtn.textContent = 'Back to Dashboard';
+      doneBtn.onclick = () => {
+        // Only go back if no active generations
+        if (state.multiBlockGeneration.activeCount === 0) {
+          showView(VIEWS.DASHBOARD);
+        } else {
+          doneBtn.textContent = 'Generations in progress...';
+          setTimeout(() => {
+            doneBtn.textContent = 'Back to Dashboard';
+          }, 2000);
+        }
+      };
+    }
+
+    updateMultiStatus();
+  }
+
+  function handleMultiClick(event) {
+    if (!state.isSelecting || !currentElement) return;
+    if (sidebar.contains(event.target)) return;
+
+    event.preventDefault();
+    event.stopPropagation();
+
+    // Get element data
+    const rect = currentElement.getBoundingClientRect();
+    const scrollY = window.scrollY;
+
+    const elementData = {
+      html: currentElement.outerHTML.substring(0, 10000),
+      bounds: {
+        x: Math.round(rect.left),
+        y: Math.round(rect.top),
+        width: Math.round(rect.width),
+        height: Math.round(rect.height),
+      },
+      yStart: Math.round(rect.top + scrollY),
+      yEnd: Math.round(rect.bottom + scrollY),
+      description: getElementDescription(currentElement),
+    };
+
+    // Add to generations and start processing
+    handleMultiElementSelected(elementData);
+
+    // Flash the overlay to show selection was recorded
+    if (overlay) {
+      overlay.style.background = 'rgba(22, 163, 74, 0.3)';
+      overlay.style.borderColor = '#16a34a';
+      setTimeout(() => {
+        overlay.style.background = 'rgba(59, 130, 246, 0.2)';
+        overlay.style.borderColor = '#3b82f6';
+      }, 200);
+    }
+  }
+
+  function handleMultiKeyDown(event) {
+    if (event.key === 'Escape') {
+      cancelMultiSelection();
+    }
+    if (event.key === 'Alt' && state.isSelecting) {
+      altKeyPressed = true;
+      const element = document.elementFromPoint(lastMouseX, lastMouseY);
+      if (element && !shouldIgnoreElement(element)) {
+        currentElement = findBestElement(element);
+        updateSelectionOverlay(currentElement);
+      }
+    }
+  }
+
+  function handleMultiElementSelected(elementData) {
+    // Generate unique ID for this generation
+    const generationId = 'gen-' + generateSessionId();
+    const sessionId = generateSessionId();
+
+    // Create generation entry
+    const generation = {
+      id: generationId,
+      sessionId,
+      elementData,
+      status: 'pending',
+      progress: {},
+      previewData: null,
+      error: null,
+      expanded: false,
+    };
+
+    // Add to state
+    state.multiBlockGeneration.generations[generationId] = generation;
+    state.multiBlockGeneration.generationOrder.push(generationId);
+
+    // Check if we can start immediately or need to queue
+    if (state.multiBlockGeneration.activeCount < MAX_PARALLEL_GENERATIONS) {
+      processMultiBlockGeneration(generationId);
+    } else {
+      state.multiBlockGeneration.queue.push(generationId);
+    }
+
+    // Update UI
+    renderMultiAccordion();
+    updateMultiStatus();
+  }
+
+  async function processMultiBlockGeneration(generationId) {
+    const generation = state.multiBlockGeneration.generations[generationId];
+    if (!generation) return;
+
+    // Mark as active
+    generation.status = 'active';
+    generation.progress = { screenshot: 'active' };
+    state.multiBlockGeneration.activeCount++;
+
+    // Remove from queue if present
+    const queueIndex = state.multiBlockGeneration.queue.indexOf(generationId);
+    if (queueIndex > -1) {
+      state.multiBlockGeneration.queue.splice(queueIndex, 1);
+    }
+
+    renderMultiAccordion();
+
+    try {
+      // Update progress stages
+      generation.progress = { screenshot: 'complete', html: 'active' };
+      renderMultiAccordion();
+
+      generation.progress = { screenshot: 'complete', html: 'complete', generate: 'active' };
+      renderMultiAccordion();
+
+      // Call the block generation API
+      const response = await sendMessage({
+        type: 'GENERATE_BLOCK',
+        url: window.location.href,
+        elementData: generation.elementData,
+        sessionId: generation.sessionId,
+      });
+
+      if (!response.success) {
+        throw new Error(response.error || 'Generation failed');
+      }
+
+      // Check if cancelled while processing
+      if (generation.status === 'rejected') {
+        return; // Already cancelled, ignore result
+      }
+
+      // Update progress
+      generation.progress = { screenshot: 'complete', html: 'complete', generate: 'complete', preview: 'complete' };
+      generation.status = 'complete';
+      generation.previewData = response;
+      generation.expanded = true; // Auto-expand completed items
+
+    } catch (error) {
+      // Check if cancelled while processing
+      if (generation.status === 'rejected') {
+        return; // Already cancelled, ignore error
+      }
+      console.error(`Generation ${generationId} failed:`, error);
+      generation.status = 'error';
+      generation.error = error.message;
+    }
+
+    // Only decrement if not already decremented by cancel
+    if (generation.status !== 'rejected') {
+      state.multiBlockGeneration.activeCount--;
+      processNextFromQueue();
+    }
+
+    renderMultiAccordion();
+    updateMultiStatus();
+  }
+
+  function processNextFromQueue() {
+    if (state.multiBlockGeneration.queue.length === 0) return;
+    if (state.multiBlockGeneration.activeCount >= MAX_PARALLEL_GENERATIONS) return;
+
+    const nextId = state.multiBlockGeneration.queue.shift();
+    if (nextId) {
+      processMultiBlockGeneration(nextId);
+    }
+  }
+
+  function renderMultiAccordion() {
+    const accordionEl = sidebar.querySelector('#aem-multi-accordion');
+    const countEl = sidebar.querySelector('#aem-multi-count');
+
+    if (!accordionEl) return;
+
+    const order = state.multiBlockGeneration.generationOrder;
+    countEl.textContent = order.length;
+
+    if (order.length === 0) {
+      accordionEl.innerHTML = '<div class="aem-multi-empty">Click elements on the page to start generating blocks</div>';
+      return;
+    }
+
+    accordionEl.innerHTML = order.map(id => {
+      const gen = state.multiBlockGeneration.generations[id];
+      return renderAccordionItem(gen);
+    }).join('');
+
+    // Attach event listeners
+    accordionEl.querySelectorAll('.aem-accordion-header').forEach(header => {
+      header.addEventListener('click', () => {
+        const id = header.dataset.id;
+        toggleAccordionItem(id);
+      });
+    });
+
+    accordionEl.querySelectorAll('.aem-multi-accept-btn').forEach(btn => {
+      btn.addEventListener('click', (e) => {
+        e.stopPropagation();
+        handleMultiAcceptBlock(btn.dataset.id);
+      });
+    });
+
+    accordionEl.querySelectorAll('.aem-multi-reject-btn').forEach(btn => {
+      btn.addEventListener('click', (e) => {
+        e.stopPropagation();
+        handleMultiRejectBlock(btn.dataset.id);
+      });
+    });
+
+    accordionEl.querySelectorAll('.aem-multi-retry-btn').forEach(btn => {
+      btn.addEventListener('click', (e) => {
+        e.stopPropagation();
+        handleRetryBlock(btn.dataset.id);
+      });
+    });
+
+    accordionEl.querySelectorAll('.aem-multi-cancel-btn').forEach(btn => {
+      btn.addEventListener('click', (e) => {
+        e.stopPropagation();
+        handleCancelBlock(btn.dataset.id);
+      });
+    });
+  }
+
+  function renderAccordionItem(gen) {
+    const statusClass = `aem-status-${gen.status}`;
+    const expandedClass = gen.expanded ? 'aem-expanded' : '';
+    const badgeClass = `aem-badge-${gen.status}`;
+
+    const badgeText = {
+      pending: 'Queued',
+      active: 'Generating',
+      complete: 'Ready',
+      error: 'Error',
+      accepted: 'Accepted',
+      rejected: 'Rejected',
+    }[gen.status] || gen.status;
+
+    // Determine title
+    const title = gen.previewData?.blockName ||
+                  gen.elementData?.description?.substring(0, 30) ||
+                  `Block ${state.multiBlockGeneration.generationOrder.indexOf(gen.id) + 1}`;
+
+    // Build content based on status
+    let content = '';
+
+    if (gen.status === 'active') {
+      content = `
+        <div class="aem-accordion-progress">
+          ${renderProgressStep('screenshot', 'Screenshot', gen.progress)}
+          ${renderProgressStep('html', 'Extract HTML', gen.progress)}
+          ${renderProgressStep('generate', 'Generate with Claude', gen.progress)}
+          ${renderProgressStep('preview', 'Create preview', gen.progress)}
+        </div>
+      `;
+    } else if (gen.status === 'error') {
+      content = `
+        <div class="aem-accordion-error">${gen.error || 'Unknown error'}</div>
+        <div class="aem-accordion-actions">
+          <button class="aem-btn aem-btn-secondary aem-multi-retry-btn" data-id="${gen.id}">Retry</button>
+        </div>
+      `;
+    } else if (gen.status === 'complete') {
+      content = `
+        <div class="aem-accordion-preview">
+          <a href="${gen.previewData?.previewUrl || '#'}" target="_blank" class="aem-accordion-preview-url">
+            ${gen.previewData?.previewUrl || 'Preview'} ↗
+          </a>
+        </div>
+        <div class="aem-accordion-actions">
+          <button class="aem-btn aem-btn-secondary aem-multi-reject-btn" data-id="${gen.id}">✗ Reject</button>
+          <button class="aem-btn aem-btn-primary aem-multi-accept-btn" data-id="${gen.id}">✓ Accept</button>
+        </div>
+      `;
+    } else if (gen.status === 'accepted') {
+      content = `
+        <div class="aem-accordion-preview">
+          <span style="color: #16a34a;">✓ Block merged to main</span>
+        </div>
+      `;
+    } else if (gen.status === 'rejected') {
+      content = `
+        <div class="aem-accordion-preview">
+          <span style="color: #6b7280;">Block rejected</span>
+        </div>
+      `;
+    } else if (gen.status === 'pending') {
+      content = `
+        <div style="padding: 8px; color: #64748b; font-size: 12px;">
+          Waiting to start... (${state.multiBlockGeneration.queue.indexOf(gen.id) + 1} in queue)
+        </div>
+      `;
+    }
+
+    return `
+      <div class="aem-accordion-item ${statusClass} ${expandedClass}">
+        <div class="aem-accordion-header" data-id="${gen.id}">
+          <span class="aem-accordion-chevron">▶</span>
+          ${gen.status === 'active' ? '<div class="aem-accordion-spinner"></div>' : ''}
+          <span class="aem-accordion-title">${escapeHtml(title)}</span>
+          <span class="aem-accordion-badge ${badgeClass}">${badgeText}</span>
+          ${['pending', 'active'].includes(gen.status) ? `<button class="aem-multi-cancel-btn" data-id="${gen.id}" title="Cancel">✕</button>` : ''}
+        </div>
+        <div class="aem-accordion-content">
+          ${content}
+        </div>
+      </div>
+    `;
+  }
+
+  function renderProgressStep(step, label, progress) {
+    const status = progress[step];
+    let icon = '○';
+    let className = '';
+
+    if (status === 'complete') {
+      icon = '✓';
+      className = 'aem-step-complete';
+    } else if (status === 'active') {
+      icon = '●';
+      className = 'aem-step-active';
+    }
+
+    return `
+      <div class="aem-accordion-step ${className}">
+        <span class="aem-accordion-step-icon">${icon}</span>
+        <span>${label}</span>
+      </div>
+    `;
+  }
+
+  function toggleAccordionItem(generationId) {
+    const gen = state.multiBlockGeneration.generations[generationId];
+    if (gen) {
+      gen.expanded = !gen.expanded;
+      renderMultiAccordion();
+    }
+  }
+
+  function updateMultiStatus() {
+    const statusEl = sidebar.querySelector('#aem-multi-status');
+    if (!statusEl) return;
+
+    const { activeCount, queue, generationOrder } = state.multiBlockGeneration;
+    const total = generationOrder.length;
+    const completed = generationOrder.filter(id =>
+      ['complete', 'accepted', 'rejected', 'error'].includes(state.multiBlockGeneration.generations[id]?.status)
+    ).length;
+
+    if (state.multiBlockGeneration.isSelecting) {
+      statusEl.textContent = `(${activeCount} running, ${queue.length} queued)`;
+    } else if (activeCount > 0) {
+      statusEl.textContent = `(${completed}/${total} complete)`;
+    } else if (total > 0) {
+      statusEl.textContent = '(all complete)';
+    } else {
+      statusEl.textContent = '(select elements on page)';
+    }
+  }
+
+  async function handleMultiAcceptBlock(generationId) {
+    const gen = state.multiBlockGeneration.generations[generationId];
+    if (!gen || gen.status !== 'complete') return;
+
+    const itemEl = sidebar.querySelector(`.aem-accordion-item[class*="${generationId}"]`);
+    const btn = sidebar.querySelector(`.aem-multi-accept-btn[data-id="${generationId}"]`);
+    if (btn) {
+      btn.disabled = true;
+      btn.textContent = 'Merging...';
+    }
+
+    try {
+      const response = await sendMessage({
+        type: 'ACCEPT_BLOCK',
+        sessionId: gen.sessionId,
+        blockName: gen.previewData?.blockName,
+        branch: gen.previewData?.branch,
+      });
+
+      if (response.success) {
+        gen.status = 'accepted';
+      } else {
+        throw new Error(response.error);
+      }
+    } catch (error) {
+      console.error('Accept failed:', error);
+      alert('Failed to accept: ' + error.message);
+      if (btn) {
+        btn.disabled = false;
+        btn.textContent = '✓ Accept';
+      }
+      return;
+    }
+
+    renderMultiAccordion();
+    updateMultiStatus();
+  }
+
+  async function handleMultiRejectBlock(generationId) {
+    const gen = state.multiBlockGeneration.generations[generationId];
+    if (!gen) return;
+
+    await sendMessage({ type: 'REJECT_BLOCK', sessionId: gen.sessionId });
+    gen.status = 'rejected';
+
+    renderMultiAccordion();
+    updateMultiStatus();
+  }
+
+  function handleCancelBlock(generationId) {
+    const gen = state.multiBlockGeneration.generations[generationId];
+    if (!gen || !['pending', 'active'].includes(gen.status)) return;
+
+    // Remove from queue if pending
+    const queueIndex = state.multiBlockGeneration.queue.indexOf(generationId);
+    if (queueIndex > -1) {
+      state.multiBlockGeneration.queue.splice(queueIndex, 1);
+    }
+
+    // If active, decrement count and process next
+    if (gen.status === 'active') {
+      state.multiBlockGeneration.activeCount--;
+      processNextFromQueue();
+    }
+
+    // Mark as cancelled (treated like rejected)
+    gen.status = 'rejected';
+    gen.error = 'Cancelled by user';
+
+    renderMultiAccordion();
+    updateMultiStatus();
+  }
+
+  function handleRetryBlock(generationId) {
+    const gen = state.multiBlockGeneration.generations[generationId];
+    if (!gen || gen.status !== 'error') return;
+
+    // Reset and retry
+    gen.status = 'pending';
+    gen.error = null;
+    gen.progress = {};
+
+    if (state.multiBlockGeneration.activeCount < MAX_PARALLEL_GENERATIONS) {
+      processMultiBlockGeneration(generationId);
+    } else {
+      state.multiBlockGeneration.queue.push(generationId);
+    }
+
+    renderMultiAccordion();
+  }
+
+  function escapeHtml(text) {
+    const div = document.createElement('div');
+    div.textContent = text;
+    return div.innerHTML;
   }
 
   // ============ Helpers ============

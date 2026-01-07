@@ -250,6 +250,12 @@ export function formatStylesForPrompt(styles: ExtractedStyles): string {
     lines.push(formatStyleObject(styles.texts[0].styles, ['font-family', 'font-size', 'color', 'line-height', 'text-align']));
   }
 
+  // Button/Link styles - CRITICAL for matching CTA colors
+  if (styles.links && styles.links.length > 0) {
+    lines.push('\n### Button/CTA Styles (USE THESE EXACT COLORS)');
+    lines.push(formatStyleObject(styles.links[0].styles, ['background-color', 'color', 'border-radius', 'padding', 'border', 'font-weight', 'font-size']));
+  }
+
   return lines.join('\n');
 }
 

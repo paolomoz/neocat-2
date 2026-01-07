@@ -104,11 +104,14 @@ Return ONLY the JSON object.`;
 
   try {
     const match = response.match(/\{[\s\S]*\}/);
-    if (!match) throw new Error('No JSON found');
+    if (!match) {
+      throw new Error(`No JSON object found in Claude response. Response starts with: ${response.substring(0, 200)}`);
+    }
     return JSON.parse(match[0]) as ComponentDescription;
   } catch (e) {
-    console.error('Failed to parse component description:', response);
-    throw new Error('Failed to parse component description');
+    const errorMsg = e instanceof Error ? e.message : String(e);
+    console.error('Failed to parse component description:', response.substring(0, 500));
+    throw new Error(`Failed to parse component description: ${errorMsg}`);
   }
 }
 
@@ -359,10 +362,14 @@ DESIGN NOTES:
 
   // Include extracted CSS if available
   const cssSection = extractedCssStyles ? `
+## EXTRACTED CSS VALUES FROM ORIGINAL PAGE (MANDATORY)
 ${extractedCssStyles}
 
-IMPORTANT: Use the EXACT CSS values above. These are the actual computed styles from the original page.
-Do not guess colors, fonts, or spacing - use these values directly in your CSS.
+**CRITICAL - COLOR ACCURACY**: The values above are the ACTUAL computed styles from the original page.
+- For BUTTONS/CTAs: Use the EXACT background-color and color values from "Button/CTA Styles" above.
+- DO NOT guess colors from the screenshot - screenshots can have color inaccuracies.
+- If a button shows background-color: #133C8F above, use EXACTLY #133C8F in your CSS.
+- These extracted values are authoritative - they override any visual interpretation.
 ` : '';
 
   const prompt = `Generate an AEM Edge Delivery Services (EDS) block that recreates this component.
@@ -425,15 +432,27 @@ DO NOT clear innerHTML. DO NOT expect multiple rows per item. DO NOT use type/va
    - NEVER write src="..." - I will inject real URLs
    - NEVER invent, guess, or use placeholder URLs
 7. **CTA/LINK STYLING - CRITICAL**: EDS renders isolated <a> tags as buttons by default (with background, padding, border-radius).
-   - Look at the original screenshot: are CTAs styled as BUTTONS or TEXT LINKS?
-   - If the original shows TEXT LINKS (no background, just colored text with maybe an arrow):
-     Your CSS MUST override EDS defaults: background: none; border: none; padding: 0; border-radius: 0;
-   - If the original shows BUTTONS with backgrounds, match that exact background color.
-   - ALWAYS match the original visual appearance, not EDS defaults.
-8. **BACKGROUND COLORS - CRITICAL**: Be conservative with backgrounds.
-   - If the section background appears WHITE or very light/neutral in the screenshot, use: background-color: white; or background: transparent;
-   - Do NOT add tinted backgrounds (lavender, pink, cream) unless they are CLEARLY visible in the original.
-   - When in doubt, use white or transparent - not a guessed color.
+   - If EXTRACTED CSS VALUES section above includes "Button/CTA Styles", use those EXACT colors.
+   - DO NOT guess button colors from the screenshot - use the extracted hex values.
+   - If the original shows TEXT LINKS (no background): override EDS defaults with background: none; border: none; padding: 0;
+   - If the original shows BUTTONS: use the EXACT background-color from extracted styles (e.g., #133C8F not a guess).
+   - Screenshots can have color shifts - extracted computed styles are always more accurate.
+8. **BACKGROUND COLORS - CRITICAL**:
+   - DO NOT add background-color to the block container itself.
+   - For cards/items inside the block: use background-color: #fff (white) or omit entirely.
+   - DO NOT guess background colors from screenshots - screenshots can have color inaccuracies.
+   - Only add non-white backgrounds to cards if the extracted CSS styles explicitly show a non-white color.
+   - Section backgrounds are controlled separately via section metadata, NOT in block CSS.
+9. **INTERACTIVE ELEMENTS - CRITICAL**:
+   - If the component has carousel/slider navigation (prev/next arrows, pagination dots), the JS MUST make them functional.
+   - Carousel pattern requirements:
+     * Implement click handlers for prev/next navigation buttons
+     * Implement click handlers for pagination dots to jump to specific slides
+     * Use CSS transform: translateX() for smooth slide transitions
+     * Track current slide index and update active dot indicator
+   - Tab pattern: implement tab click handlers to show/hide content panels.
+   - Accordion pattern: implement expand/collapse click handlers.
+   - ALL user interactions visible in the original MUST work in the generated block - static navigation is unacceptable.
 
 ## Return Format
 
@@ -460,21 +479,32 @@ Return ONLY the JSON object.`;
       if (jsonMatch) jsonStr = jsonMatch[0];
     }
 
-    if (!jsonStr) throw new Error('No JSON found in response');
+    if (!jsonStr) {
+      throw new Error(`No JSON block found in Claude response. Response starts with: ${response.substring(0, 200)}`);
+    }
 
     const parsed = JSON.parse(jsonStr);
+
+    // Validate required fields
+    if (!parsed.blockName) {
+      throw new Error('Generated code missing blockName field');
+    }
+    if (!parsed.html) {
+      throw new Error('Generated code missing html field');
+    }
 
     return {
       blockName: parsed.blockName,
       componentType: description.componentType,
       html: parsed.html,
-      css: parsed.css,
-      js: parsed.js,
+      css: parsed.css || '',
+      js: parsed.js || '',
       description,
     };
   } catch (e) {
+    const errorMsg = e instanceof Error ? e.message : String(e);
     console.error('Failed to parse generated code:', response.substring(0, 500));
-    throw new Error('Failed to parse generated code');
+    throw new Error(`Failed to parse generated block code: ${errorMsg}`);
   }
 }
 
@@ -628,7 +658,7 @@ export async function generateBlockEnhanced(
 }
 
 /**
- * Helper to call Claude API
+ * Helper to call Claude API with detailed error reporting
  */
 async function callClaude(
   imageBase64: string,
@@ -639,70 +669,104 @@ async function callClaude(
 ): Promise<string> {
   console.log(`callClaude: using media type ${imageMediaType}, image length ${imageBase64.length}`);
   let response: Response;
+  let apiEndpoint: string;
 
-  if (config.useBedrock && config.bedrockToken) {
-    const region = config.bedrockRegion || 'us-east-1';
-    const model = config.bedrockModel || 'anthropic.claude-sonnet-4-20250514-v1:0';
-    const bedrockUrl = `https://bedrock-runtime.${region}.amazonaws.com/model/${encodeURIComponent(model)}/invoke`;
+  try {
+    if (config.useBedrock && config.bedrockToken) {
+      const region = config.bedrockRegion || 'us-east-1';
+      const model = config.bedrockModel || 'anthropic.claude-sonnet-4-20250514-v1:0';
+      apiEndpoint = `Bedrock (${region}, ${model})`;
+      const bedrockUrl = `https://bedrock-runtime.${region}.amazonaws.com/model/${encodeURIComponent(model)}/invoke`;
 
-    response = await fetch(bedrockUrl, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'Authorization': `Bearer ${config.bedrockToken}`,
-      },
-      body: JSON.stringify({
-        anthropic_version: 'bedrock-2023-05-31',
-        max_tokens: maxTokens,
-        messages: [
-          {
-            role: 'user',
-            content: [
-              { type: 'image', source: { type: 'base64', media_type: imageMediaType, data: imageBase64 } },
-              { type: 'text', text: prompt },
-            ],
-          },
-        ],
-      }),
-    });
-  } else if (config.apiKey) {
-    response = await fetch('https://api.anthropic.com/v1/messages', {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'x-api-key': config.apiKey,
-        'anthropic-version': '2023-06-01',
-      },
-      body: JSON.stringify({
-        model: 'claude-sonnet-4-20250514',
-        max_tokens: maxTokens,
-        messages: [
-          {
-            role: 'user',
-            content: [
-              { type: 'image', source: { type: 'base64', media_type: imageMediaType, data: imageBase64 } },
-              { type: 'text', text: prompt },
-            ],
-          },
-        ],
-      }),
-    });
-  } else {
-    throw new Error('No Anthropic API configuration provided');
+      response = await fetch(bedrockUrl, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${config.bedrockToken}`,
+        },
+        body: JSON.stringify({
+          anthropic_version: 'bedrock-2023-05-31',
+          max_tokens: maxTokens,
+          messages: [
+            {
+              role: 'user',
+              content: [
+                { type: 'image', source: { type: 'base64', media_type: imageMediaType, data: imageBase64 } },
+                { type: 'text', text: prompt },
+              ],
+            },
+          ],
+        }),
+      });
+    } else if (config.apiKey) {
+      apiEndpoint = 'Anthropic API (claude-sonnet-4-20250514)';
+      response = await fetch('https://api.anthropic.com/v1/messages', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'x-api-key': config.apiKey,
+          'anthropic-version': '2023-06-01',
+        },
+        body: JSON.stringify({
+          model: 'claude-sonnet-4-20250514',
+          max_tokens: maxTokens,
+          messages: [
+            {
+              role: 'user',
+              content: [
+                { type: 'image', source: { type: 'base64', media_type: imageMediaType, data: imageBase64 } },
+                { type: 'text', text: prompt },
+              ],
+            },
+          ],
+        }),
+      });
+    } else {
+      throw new Error('No Anthropic API configuration provided (missing apiKey or bedrockToken)');
+    }
+  } catch (fetchError) {
+    // Network error or fetch failure
+    const errorMsg = fetchError instanceof Error ? fetchError.message : String(fetchError);
+    throw new Error(`Claude API network error: ${errorMsg}`);
   }
 
   if (!response.ok) {
-    const error = await response.text();
-    throw new Error(`Claude API error: ${response.status} - ${error}`);
+    const errorBody = await response.text();
+    // Parse error details if possible
+    let errorDetail = errorBody;
+    try {
+      const parsed = JSON.parse(errorBody);
+      errorDetail = parsed.error?.message || parsed.message || errorBody;
+    } catch {
+      // Keep original error body
+    }
+
+    // Provide specific error messages for common HTTP status codes
+    const statusMessages: Record<number, string> = {
+      400: 'Bad request - check image size or prompt format',
+      401: 'Authentication failed - invalid API key',
+      403: 'Access denied - check API key permissions',
+      429: 'Rate limited - too many requests, please retry',
+      500: 'Claude server error - please retry',
+      502: 'Claude gateway error - please retry',
+      503: 'Claude service unavailable - please retry',
+      529: 'Claude overloaded - please retry in a few seconds',
+    };
+
+    const statusHint = statusMessages[response.status] || '';
+    throw new Error(`Claude API error (${apiEndpoint}): HTTP ${response.status}${statusHint ? ` - ${statusHint}` : ''}. Details: ${errorDetail}`);
   }
 
-  const result = await response.json() as {
-    content: Array<{ type: string; text?: string }>;
-  };
+  let result: { content: Array<{ type: string; text?: string }> };
+  try {
+    result = await response.json() as typeof result;
+  } catch (parseError) {
+    throw new Error(`Claude API returned invalid JSON response`);
+  }
 
-  const textContent = result.content.find(c => c.type === 'text');
+  const textContent = result.content?.find(c => c.type === 'text');
   if (!textContent?.text) {
-    throw new Error('No text response from Claude');
+    throw new Error(`Claude API returned no text content. Response: ${JSON.stringify(result).substring(0, 200)}`);
   }
 
   return textContent.text;
