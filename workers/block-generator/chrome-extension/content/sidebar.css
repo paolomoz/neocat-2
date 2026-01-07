@@ -357,6 +357,11 @@
   width: 100%;
 }
 
+/* Utility: margin-top 8px */
+.aem-mt-8 {
+  margin-top: 8px;
+}
+
 .aem-icon-btn {
   width: 32px;
   height: 32px;
@@ -617,6 +622,175 @@
 
 .aem-preview-link:hover {
   text-decoration: underline;
+}
+
+/* ============ Variants Grid ============ */
+.aem-variants-section {
+  margin-bottom: var(--spectrum-spacing-200);
+  padding: var(--spectrum-spacing-100);
+  background: var(--spectrum-gray-100);
+  border-radius: var(--spectrum-radius-100);
+  border: 1px solid var(--spectrum-gray-200);
+}
+
+.aem-variants-section label {
+  display: block;
+  font-size: var(--spectrum-font-size-50);
+  color: var(--spectrum-gray-600);
+  margin-bottom: var(--spectrum-spacing-100);
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  font-weight: var(--spectrum-font-weight-medium);
+}
+
+.aem-variants-grid {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 4px;
+}
+
+.aem-variant-cell {
+  padding: 6px 8px;
+  text-align: center;
+  border-radius: var(--spectrum-radius-100);
+  font-size: 11px;
+  cursor: pointer;
+  transition: all var(--spectrum-animation-duration-100) var(--spectrum-animation-ease);
+  border: 2px solid transparent;
+  text-decoration: none;
+  display: block;
+}
+
+.aem-variant-cell.pending {
+  background: var(--spectrum-gray-200);
+  color: var(--spectrum-gray-500);
+  cursor: default;
+}
+
+.aem-variant-cell.loading {
+  background: var(--spectrum-blue-100);
+  color: var(--spectrum-blue-700);
+  cursor: default;
+  animation: pulse 1.5s ease-in-out infinite;
+}
+
+.aem-variant-cell.ready {
+  background: var(--spectrum-green-100);
+  color: var(--spectrum-green-800);
+}
+
+.aem-variant-cell.ready:hover {
+  background: var(--spectrum-green-200);
+}
+
+.aem-variant-cell.winner {
+  background: var(--spectrum-orange-100);
+  border-color: var(--spectrum-orange-500);
+  color: var(--spectrum-orange-900);
+  font-weight: var(--spectrum-font-weight-bold);
+}
+
+.aem-variant-cell.selected {
+  background: var(--spectrum-accent-color-600);
+  color: white;
+  border-color: var(--spectrum-accent-color-800);
+}
+
+.aem-winner-info {
+  margin-top: var(--spectrum-spacing-100);
+  padding: var(--spectrum-spacing-100);
+  background: var(--spectrum-orange-100);
+  border-radius: var(--spectrum-radius-100);
+  border-left: 3px solid var(--spectrum-orange-500);
+}
+
+.aem-winner-info .winner-label {
+  font-size: var(--spectrum-font-size-75);
+  font-weight: var(--spectrum-font-weight-bold);
+  color: var(--spectrum-orange-900);
+  margin-bottom: var(--spectrum-spacing-50);
+}
+
+.aem-winner-info .winner-reasoning {
+  font-size: var(--spectrum-font-size-50);
+  color: var(--spectrum-gray-700);
+  font-style: italic;
+}
+
+.aem-winner-info .winner-confidence {
+  font-size: var(--spectrum-font-size-50);
+  color: var(--spectrum-gray-600);
+  margin-top: var(--spectrum-spacing-50);
+}
+
+.aem-selecting-winner {
+  text-align: center;
+  padding: var(--spectrum-spacing-100);
+  color: var(--spectrum-gray-600);
+  font-size: var(--spectrum-font-size-75);
+}
+
+.aem-selecting-winner::before {
+  content: '';
+  display: inline-block;
+  width: 12px;
+  height: 12px;
+  border: 2px solid var(--spectrum-gray-400);
+  border-top-color: var(--spectrum-accent-color-600);
+  border-radius: 50%;
+  animation: spin 1s linear infinite;
+  margin-right: 8px;
+  vertical-align: middle;
+}
+
+@keyframes spin {
+  to { transform: rotate(360deg); }
+}
+
+/* Accordion variants grid */
+.aem-accordion-variants {
+  margin: var(--spectrum-spacing-100) 0;
+  padding: var(--spectrum-spacing-100);
+  background: var(--spectrum-gray-100);
+  border-radius: var(--spectrum-radius-100);
+}
+
+.aem-accordion-variants label {
+  display: block;
+  font-size: var(--spectrum-font-size-50);
+  color: var(--spectrum-gray-600);
+  margin-bottom: var(--spectrum-spacing-50);
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
+
+.aem-accordion-variants .aem-variants-grid {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 3px;
+}
+
+.aem-accordion-variants .aem-variant-cell {
+  padding: 4px 6px;
+  font-size: 10px;
+}
+
+.aem-accordion-variants .aem-winner-info {
+  margin-top: var(--spectrum-spacing-75);
+  padding: var(--spectrum-spacing-75);
+}
+
+.aem-accordion-variants .aem-winner-info .winner-label {
+  font-size: var(--spectrum-font-size-50);
+}
+
+.aem-accordion-variants .aem-winner-info .winner-reasoning {
+  font-size: 10px;
+}
+
+.aem-accordion-variants .aem-selecting-winner {
+  font-size: var(--spectrum-font-size-50);
+  padding: var(--spectrum-spacing-75);
 }
 
 /* ============ Code Section ============ */

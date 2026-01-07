@@ -297,6 +297,17 @@ Analyze the visual differences and provide REFINED code that will make the gener
    - If the original has carousel navigation (arrows, dots), ensure the JS makes them functional
    - Navigation must use click handlers, not just visual elements
    - Carousel should use translateX() transforms for smooth sliding
+7. **IMAGE SIZING - CRITICAL**:
+   - Images must display at their ORIGINAL/NATURAL size to match the source design
+   - Use CSS: max-width: none; width: auto; height: auto; to preserve original dimensions
+   - DO NOT force aspect-ratio or object-fit: cover unless the design clearly crops images
+   - For logos, badges, icons: let them render at natural size
+   - If an image appears at a specific size in the original, match that exact width
+8. **BACKGROUND IMAGES (decorative patterns/shapes)**:
+   - Decorative background images (waves, shapes, patterns) should be <img> elements, NOT CSS background-image
+   - Position them absolutely with z-index: 0 or -1 to place behind content
+   - Match the original background-size and background-position from the source design
+   - Parent container needs position: relative
 
 ${focusInstructions}
 

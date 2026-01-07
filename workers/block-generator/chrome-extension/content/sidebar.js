@@ -137,6 +137,7 @@
             </small>
           </div>
           <button id="aem-save-config" class="aem-btn aem-btn-primary aem-btn-full">Connect</button>
+          <button id="aem-reset-config" class="aem-btn aem-btn-secondary aem-btn-full aem-mt-8">Reset to Default</button>
           <div id="aem-setup-status" class="aem-status aem-hidden"></div>
         </div>
 
@@ -208,6 +209,21 @@
             <a id="aem-preview-link" href="#" target="_blank" class="aem-preview-link">
               <span id="aem-preview-url-text">-</span> &#8599;
             </a>
+          </div>
+
+          <div id="aem-variants-section" class="aem-variants-section aem-hidden">
+            <label>All Variants:</label>
+            <div id="aem-variants-grid" class="aem-variants-grid">
+              <!-- Dynamically populated with variant cells -->
+            </div>
+            <div id="aem-winner-info" class="aem-winner-info aem-hidden">
+              <div class="winner-label">Winner: <span id="aem-winner-label">-</span></div>
+              <div class="winner-reasoning" id="aem-winner-reasoning"></div>
+              <div class="winner-confidence" id="aem-winner-confidence"></div>
+            </div>
+            <div id="aem-selecting-winner" class="aem-selecting-winner aem-hidden">
+              Selecting best variant...
+            </div>
           </div>
 
           <div class="aem-code-section">
@@ -322,6 +338,7 @@
 
     // Setup
     sidebar.querySelector('#aem-save-config').addEventListener('click', handleSaveConfig);
+    sidebar.querySelector('#aem-reset-config').addEventListener('click', handleResetConfig);
     sidebar.querySelector('#aem-github-repo').addEventListener('input', handleRepoInputChange);
     sidebar.querySelector('#aem-toggle-token').addEventListener('click', toggleTokenVisibility);
 
@@ -583,11 +600,15 @@
       }
     }
 
+    // Determine if this is the default repo (uses server token)
+    const isDefault = isDefaultRepo(repoString);
+
     await saveConfig({
       githubRepo: repoString,
       daOrg: owner,
       daSite: repo,
       githubToken: tokenInput || null, // Store token (null for default repo)
+      useServerToken: isDefault, // Use server token for default repo
     });
 
     showStatus(statusEl, 'Connected!', false);
@@ -596,6 +617,36 @@
       showView(VIEWS.DASHBOARD);
       updateDashboard();
     }, 500);
+  }
+
+  async function handleResetConfig() {
+    const statusEl = sidebar.querySelector('#aem-setup-status');
+    const repoInput = sidebar.querySelector('#aem-github-repo');
+    const tokenInput = sidebar.querySelector('#aem-github-token');
+    const tokenGroup = sidebar.querySelector('#aem-token-group');
+
+    // Reset to default values
+    const [owner, repo] = DEFAULT_GITHUB_REPO.split('/');
+
+    await saveConfig({
+      githubRepo: DEFAULT_GITHUB_REPO,
+      daOrg: owner,
+      daSite: repo,
+      githubToken: null, // No client token - use server-side token
+      useServerToken: true, // Explicit flag to use server token
+    });
+
+    // Update UI
+    repoInput.value = DEFAULT_GITHUB_REPO;
+    tokenInput.value = '';
+    tokenGroup.classList.add('aem-hidden');
+
+    showStatus(statusEl, 'Reset to default repository. Using server authentication.', false);
+
+    setTimeout(() => {
+      showView(VIEWS.DASHBOARD);
+      updateDashboard();
+    }, 1000);
   }
 
   function showStatus(el, message, isError) {
@@ -809,6 +860,10 @@
       // Capture screenshot
       updateProgress({ screenshot: 'complete', html: 'active' });
 
+      // Initialize variants grid immediately (fallback in case message isn't received)
+      console.log('[Sidebar] Initializing variants grid before generation');
+      initializeVariantsGrid(3, 1); // 3 options, 1 iteration each
+
       const response = await sendMessage({
         type: 'GENERATE_BLOCK',
         url: window.location.href,
@@ -886,7 +941,175 @@
       js: data.js || '',
     };
 
+    // Store variants data for selection
+    if (data.variants && data.variants.length > 0) {
+      state.variants = data.variants;
+      state.selectedVariant = data.winner ?
+        data.variants.find(v => v.option === data.winner.option && v.iteration === data.winner.iteration) :
+        data.variants[data.variants.length - 1];
+      state.winnerInfo = data.winner;
+      state.sessionId = data.sessionId;
+
+      // Show variants section with all variants
+      displayVariantsGrid(data.variants, data.winner);
+    }
+
     updateCodeDisplay();
+  }
+
+  // ============ Variants Grid ============
+
+  function initializeVariantsGrid(numOptions, iterationsPerOption) {
+    const grid = sidebar.querySelector('#aem-variants-grid');
+    const section = sidebar.querySelector('#aem-variants-section');
+    if (!grid || !section) return;
+
+    // Clear and populate grid with pending cells
+    grid.innerHTML = '';
+    for (let opt = 1; opt <= numOptions; opt++) {
+      for (let iter = 1; iter <= iterationsPerOption; iter++) {
+        const cell = document.createElement('span');
+        cell.className = 'aem-variant-cell pending';
+        cell.id = `aem-variant-${opt}-${iter}`;
+        cell.textContent = `${opt}-${iter}`;
+        cell.dataset.option = opt;
+        cell.dataset.iteration = iter;
+        grid.appendChild(cell);
+      }
+    }
+
+    // Show the section during generation
+    section.classList.remove('aem-hidden');
+    sidebar.querySelector('#aem-winner-info')?.classList.add('aem-hidden');
+    sidebar.querySelector('#aem-selecting-winner')?.classList.add('aem-hidden');
+
+    // Initialize variants state
+    state.variants = [];
+    state.selectedVariant = null;
+    state.winnerInfo = null;
+  }
+
+  function updateVariantCell(option, iteration, status, variantData) {
+    const cell = sidebar.querySelector(`#aem-variant-${option}-${iteration}`);
+    if (!cell) return;
+
+    cell.className = `aem-variant-cell ${status}`;
+
+    if (status === 'ready' && variantData?.previewUrl) {
+      // Make it a clickable link
+      cell.style.cursor = 'pointer';
+      cell.title = `Preview ${option}-${iteration}`;
+      cell.dataset.previewUrl = variantData.previewUrl;
+      cell.dataset.branch = variantData.branch || '';
+
+      cell.onclick = () => {
+        window.open(variantData.previewUrl, '_blank');
+      };
+    }
+  }
+
+  function showSelectingWinner() {
+    sidebar.querySelector('#aem-selecting-winner')?.classList.remove('aem-hidden');
+  }
+
+  function displayVariantsGrid(variants, winnerInfo) {
+    const grid = sidebar.querySelector('#aem-variants-grid');
+    const section = sidebar.querySelector('#aem-variants-section');
+    const winnerInfoEl = sidebar.querySelector('#aem-winner-info');
+    const selectingEl = sidebar.querySelector('#aem-selecting-winner');
+
+    if (!grid || !section) return;
+
+    // Hide selecting indicator
+    selectingEl?.classList.add('aem-hidden');
+
+    // Clear and populate grid
+    grid.innerHTML = '';
+
+    // Determine grid dimensions
+    const options = [...new Set(variants.map(v => v.option))].sort((a, b) => a - b);
+    const iterations = [...new Set(variants.map(v => v.iteration))].sort((a, b) => a - b);
+
+    for (const opt of options) {
+      for (const iter of iterations) {
+        const variant = variants.find(v => v.option === opt && v.iteration === iter);
+        const cell = document.createElement('a');
+        cell.className = 'aem-variant-cell ready';
+        cell.id = `aem-variant-${opt}-${iter}`;
+        cell.textContent = `${opt}-${iter}`;
+        cell.dataset.option = opt;
+        cell.dataset.iteration = iter;
+
+        if (variant) {
+          cell.href = variant.previewUrl || '#';
+          cell.target = '_blank';
+          cell.title = `Preview ${opt}-${iter}`;
+
+          // Mark winner
+          if (winnerInfo && winnerInfo.option === opt && winnerInfo.iteration === iter) {
+            cell.classList.add('winner');
+            cell.textContent = `★${opt}-${iter}`;
+          }
+
+          // Mark selected (initially same as winner)
+          if (state.selectedVariant?.option === opt && state.selectedVariant?.iteration === iter) {
+            cell.classList.add('selected');
+          }
+
+          // Right-click to select as winner
+          cell.addEventListener('contextmenu', (e) => {
+            e.preventDefault();
+            selectVariantAsWinner(variant);
+          });
+        } else {
+          cell.classList.add('pending');
+        }
+
+        grid.appendChild(cell);
+      }
+    }
+
+    // Show winner info
+    if (winnerInfo && winnerInfoEl) {
+      sidebar.querySelector('#aem-winner-label').textContent =
+        `${winnerInfo.option}-${winnerInfo.iteration}`;
+      sidebar.querySelector('#aem-winner-reasoning').textContent =
+        winnerInfo.reasoning || '';
+      sidebar.querySelector('#aem-winner-confidence').textContent =
+        winnerInfo.confidence ? `Confidence: ${winnerInfo.confidence}%` : '';
+      winnerInfoEl.classList.remove('aem-hidden');
+    }
+
+    section.classList.remove('aem-hidden');
+  }
+
+  function selectVariantAsWinner(variant) {
+    if (!variant) return;
+
+    // Update state
+    state.selectedVariant = variant;
+
+    // Update UI - remove selected from all, add to this one
+    sidebar.querySelectorAll('.aem-variant-cell').forEach(cell => {
+      cell.classList.remove('selected');
+      if (parseInt(cell.dataset.option) === variant.option &&
+          parseInt(cell.dataset.iteration) === variant.iteration) {
+        cell.classList.add('selected');
+      }
+    });
+
+    // Update preview URL and code
+    sidebar.querySelector('#aem-preview-url-text').textContent = variant.previewUrl || '-';
+    sidebar.querySelector('#aem-preview-link').href = variant.previewUrl || '#';
+
+    state.currentCode = {
+      html: variant.html || '',
+      css: variant.css || '',
+      js: variant.js || '',
+    };
+    updateCodeDisplay();
+
+    console.log(`[Sidebar] Selected variant ${variant.option}-${variant.iteration} as winner`);
   }
 
   function switchCodeTab(tab) {
@@ -924,11 +1147,15 @@
     btn.textContent = 'Merging...';
 
     try {
+      // Use selected variant (may be user-chosen or auto-winner), fall back to previewData
+      const variant = state.selectedVariant || state.previewData;
       const response = await sendMessage({
         type: 'ACCEPT_BLOCK',
         sessionId: state.sessionId,
-        blockName: state.previewData?.blockName,
-        branch: state.previewData?.branch,
+        blockName: variant?.blockName,
+        branch: variant?.branch,
+        option: variant?.option,
+        iteration: variant?.iteration,
       });
 
       if (response.success) {
@@ -1597,6 +1824,12 @@
       previewData: null,
       error: null,
       expanded: false,
+      // Variants tracking
+      variants: [],
+      variantsGrid: { numOptions: 3, iterationsPerOption: 1 },
+      selectedVariant: null,
+      winnerInfo: null,
+      selectingWinner: false,
     };
 
     // Add to state
@@ -1639,6 +1872,10 @@
 
       generation.progress = { screenshot: 'complete', html: 'complete', generate: 'active' };
       renderMultiAccordion();
+
+      // Initialize variants grid immediately (fallback in case message isn't received)
+      console.log('[Sidebar] Initializing variants grid before multi-block generation');
+      initializeVariantsGrid(3, 1); // 3 options, 1 iteration each
 
       // Call the block generation API
       const response = await sendMessage({
@@ -1747,6 +1984,34 @@
         handleCancelBlock(btn.dataset.id);
       });
     });
+
+    // Right-click on variant cells to select as winner
+    accordionEl.querySelectorAll('.aem-accordion-variants .aem-variant-cell.ready').forEach(cell => {
+      cell.addEventListener('contextmenu', (e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        const genId = cell.dataset.genId;
+        const option = parseInt(cell.dataset.option);
+        const iteration = parseInt(cell.dataset.iteration);
+        selectAccordionVariantAsWinner(genId, option, iteration);
+      });
+    });
+  }
+
+  function selectAccordionVariantAsWinner(genId, option, iteration) {
+    const gen = state.multiBlockGeneration.generations[genId];
+    if (!gen || gen.status !== 'complete') return;
+
+    const variant = gen.variants.find(v => v.option === option && v.iteration === iteration);
+    if (!variant) return;
+
+    // Update state
+    gen.selectedVariant = variant;
+
+    // Re-render accordion to update UI
+    renderMultiAccordion();
+
+    console.log(`[Sidebar] Selected variant ${option}-${iteration} for generation ${genId}`);
   }
 
   function renderAccordionItem(gen) {
@@ -1779,6 +2044,7 @@
           ${renderProgressStep('generate', 'Generate with Claude', gen.progress)}
           ${renderProgressStep('preview', 'Create preview', gen.progress)}
         </div>
+        ${renderAccordionVariantsGrid(gen)}
       `;
     } else if (gen.status === 'error') {
       content = `
@@ -1789,9 +2055,10 @@
       `;
     } else if (gen.status === 'complete') {
       content = `
+        ${renderAccordionVariantsGrid(gen)}
         <div class="aem-accordion-preview">
-          <a href="${gen.previewData?.previewUrl || '#'}" target="_blank" class="aem-accordion-preview-url">
-            ${gen.previewData?.previewUrl || 'Preview'} ↗
+          <a href="${gen.selectedVariant?.previewUrl || gen.previewData?.previewUrl || '#'}" target="_blank" class="aem-accordion-preview-url">
+            ${gen.selectedVariant?.previewUrl || gen.previewData?.previewUrl || 'Preview'} ↗
           </a>
         </div>
         <div class="aem-accordion-actions">
@@ -1856,6 +2123,64 @@
     `;
   }
 
+  function renderAccordionVariantsGrid(gen) {
+    const { numOptions, iterationsPerOption } = gen.variantsGrid;
+    const variants = gen.variants || [];
+    const winner = gen.winnerInfo;
+    const selected = gen.selectedVariant;
+
+    // Build cells
+    let cells = '';
+    for (let opt = 1; opt <= numOptions; opt++) {
+      for (let iter = 1; iter <= iterationsPerOption; iter++) {
+        const variant = variants.find(v => v.option === opt && v.iteration === iter);
+        const cellId = `aem-variant-${gen.id}-${opt}-${iter}`;
+        let className = 'aem-variant-cell';
+        let label = `${opt}-${iter}`;
+
+        if (variant) {
+          className += ' ready';
+          if (winner && winner.option === opt && winner.iteration === iter) {
+            className += ' winner';
+            label = `★${opt}-${iter}`;
+          }
+          if (selected && selected.option === opt && selected.iteration === iter) {
+            className += ' selected';
+          }
+        } else {
+          className += ' pending';
+        }
+
+        const href = variant?.previewUrl || '#';
+        cells += `<a id="${cellId}" class="${className}" href="${href}" target="_blank"
+                     data-gen-id="${gen.id}" data-option="${opt}" data-iteration="${iter}"
+                     title="${variant ? 'Click to preview, right-click to select' : 'Pending...'}">${label}</a>`;
+      }
+    }
+
+    // Winner/selecting indicator
+    let winnerHtml = '';
+    if (gen.selectingWinner) {
+      winnerHtml = '<div class="aem-selecting-winner">Selecting best variant...</div>';
+    } else if (winner) {
+      winnerHtml = `
+        <div class="aem-winner-info">
+          <div class="winner-label">Winner: ${winner.option}-${winner.iteration}</div>
+          ${winner.reasoning ? `<div class="winner-reasoning">${escapeHtml(winner.reasoning)}</div>` : ''}
+          ${winner.confidence ? `<div class="winner-confidence">Confidence: ${winner.confidence}%</div>` : ''}
+        </div>
+      `;
+    }
+
+    return `
+      <div class="aem-accordion-variants" data-gen-id="${gen.id}">
+        <label>Variants:</label>
+        <div class="aem-variants-grid">${cells}</div>
+        ${winnerHtml}
+      </div>
+    `;
+  }
+
   function toggleAccordionItem(generationId) {
     const gen = state.multiBlockGeneration.generations[generationId];
     if (gen) {
@@ -1896,12 +2221,17 @@
       btn.textContent = 'Merging...';
     }
 
+    // Use selected variant (may be user-chosen or auto-winner), fall back to previewData
+    const variant = gen.selectedVariant || gen.previewData;
+
     try {
       const response = await sendMessage({
         type: 'ACCEPT_BLOCK',
         sessionId: gen.sessionId,
-        blockName: gen.previewData?.blockName,
-        branch: gen.previewData?.branch,
+        blockName: variant?.blockName,
+        branch: variant?.branch,
+        option: variant?.option,
+        iteration: variant?.iteration,
       });
 
       if (response.success) {
@@ -1990,6 +2320,14 @@
     });
   }
 
+  function findGenerationBySessionId(sessionId) {
+    if (!sessionId || !state.multiBlockGeneration?.generations) return null;
+    for (const gen of Object.values(state.multiBlockGeneration.generations)) {
+      if (gen.sessionId === sessionId) return gen;
+    }
+    return null;
+  }
+
   const IGNORED_TAGS = ['html', 'body', 'script', 'style', 'link', 'meta', 'head', 'noscript'];
 
   function shouldIgnoreElement(element) {
@@ -2066,12 +2404,95 @@
 
   // ============ Message Listener ============
 
+  // Track overlay state for screenshot capture
+  let overlayHiddenForScreenshot = false;
+  let overlayStateBeforeHide = null;
+
   chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
+    console.log('[Sidebar] Message received:', message.type, message);
     if (message.type === 'OPEN_SIDEBAR') {
       show();
       sendResponse({ success: true });
     } else if (message.type === 'GENERATION_PROGRESS') {
       updateProgress(message.progress);
+    } else if (message.type === 'HIDE_OVERLAY_FOR_SCREENSHOT') {
+      // Hide the selection overlay before screenshot capture
+      // This prevents the green/blue overlay tint from polluting the screenshot
+      if (overlay && overlay.style.display !== 'none') {
+        overlayStateBeforeHide = {
+          display: overlay.style.display,
+          background: overlay.style.background,
+          borderColor: overlay.style.borderColor,
+        };
+        overlay.style.display = 'none';
+        overlayHiddenForScreenshot = true;
+        console.log('Overlay hidden for screenshot capture');
+      }
+      if (tooltip && tooltip.style.display !== 'none') {
+        tooltip.style.display = 'none';
+      }
+      sendResponse({ success: true });
+    } else if (message.type === 'RESTORE_OVERLAY_AFTER_SCREENSHOT') {
+      // Restore the overlay after screenshot capture (for multi-selection mode)
+      if (overlayHiddenForScreenshot && overlay && overlayStateBeforeHide) {
+        // Only restore if still in selection mode
+        if (state.isSelecting || state.multiBlockGeneration?.isSelecting) {
+          overlay.style.display = overlayStateBeforeHide.display || 'block';
+          // Reset to blue (not green) after screenshot
+          overlay.style.background = 'rgba(59, 130, 246, 0.2)';
+          overlay.style.borderColor = '#3b82f6';
+          console.log('Overlay restored after screenshot capture');
+        }
+        overlayHiddenForScreenshot = false;
+        overlayStateBeforeHide = null;
+      }
+      sendResponse({ success: true });
+    } else if (message.type === 'GENERATION_STARTED') {
+      // Initialize variants grid with pending cells
+      // For single-block mode (Preview view)
+      initializeVariantsGrid(message.numOptions, message.iterationsPerOption);
+      // For multi-block mode - find generation by sessionId
+      const gen = findGenerationBySessionId(message.sessionId);
+      if (gen) {
+        gen.variantsGrid = { numOptions: message.numOptions, iterationsPerOption: message.iterationsPerOption };
+        gen.variants = [];
+        renderMultiAccordion();
+      }
+      sendResponse({ success: true });
+    } else if (message.type === 'VARIANT_READY') {
+      // Update a specific variant cell to ready state
+      // For single-block mode (Preview view)
+      updateVariantCell(message.variant.option, message.variant.iteration, 'ready', message.variant);
+      // For multi-block mode - find generation by sessionId
+      const gen = findGenerationBySessionId(message.sessionId);
+      if (gen) {
+        gen.variants.push(message.variant);
+        renderMultiAccordion();
+      }
+      sendResponse({ success: true });
+    } else if (message.type === 'SELECTING_WINNER') {
+      // Show winner selection in progress
+      // For single-block mode (Preview view)
+      showSelectingWinner();
+      // For multi-block mode - find generation by sessionId
+      const gen = findGenerationBySessionId(message.sessionId);
+      if (gen) {
+        gen.selectingWinner = true;
+        renderMultiAccordion();
+      }
+      sendResponse({ success: true });
+    } else if (message.type === 'WINNER_SELECTED') {
+      // For multi-block mode - find generation by sessionId and set winner
+      const gen = findGenerationBySessionId(message.sessionId);
+      if (gen) {
+        gen.selectingWinner = false;
+        gen.winnerInfo = message.winner;
+        gen.selectedVariant = gen.variants.find(
+          v => v.option === message.winner?.option && v.iteration === message.winner?.iteration
+        );
+        renderMultiAccordion();
+      }
+      sendResponse({ success: true });
     }
     return true;
   });

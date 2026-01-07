@@ -21,9 +21,10 @@ export async function extractLiveImages(
   selector: string,
   baseUrl: string
 ): Promise<ExtractedImage[]> {
-  return page.evaluate((params: { selector: string; baseUrl: string }) => {
+  const result = await page.evaluate((params: { selector: string; baseUrl: string }) => {
     const { selector, baseUrl } = params;
     const images: Array<{ src: string; alt: string; role: 'photo' | 'background' | 'icon' }> = [];
+    const debugLogs: string[] = [];
     const seenUrls = new Set<string>();
 
     function isPlaceholder(url: string): boolean {
@@ -125,17 +126,21 @@ export async function extractLiveImages(
       }
     });
 
-    // Extract CSS background images (computed styles)
-    container.querySelectorAll('*').forEach(el => {
+    // Helper to extract background images from an element
+    function extractBgFromElement(el: Element, source: string) {
       const computed = window.getComputedStyle(el);
       const bgImage = computed.backgroundImage;
 
       if (bgImage && bgImage !== 'none') {
+        debugLogs.push(`[BG] Found on ${source}: ${bgImage.substring(0, 100)}`);
         // Extract all URLs from background-image (might have multiple)
         const urlMatches = bgImage.matchAll(/url\(['"]?([^'")\s]+)['"]?\)/g);
         for (const match of urlMatches) {
           const url = match[1];
-          if (url) addImage(url, 'Background', 'background');
+          if (url) {
+            debugLogs.push(`[BG] Extracted URL: ${url.substring(0, 80)}`);
+            addImage(url, 'Background', 'background');
+          }
         }
       }
 
@@ -145,10 +150,41 @@ export async function extractLiveImages(
         const val = el.getAttribute(attr);
         if (val) addImage(val, 'Background', 'background');
       }
-    });
+    }
 
-    return images;
+    // Extract CSS background images from container ITSELF (important - often has the background)
+    debugLogs.push(`[BG] Checking container: ${container.tagName}.${container.className}`);
+    extractBgFromElement(container, 'container');
+
+    // Also check parent elements (up to 3 levels) for background images
+    // Background may be on a wrapper element
+    let parent = container.parentElement;
+    for (let i = 0; i < 3 && parent; i++) {
+      debugLogs.push(`[BG] Checking parent ${i + 1}: ${parent.tagName}.${parent.className}`);
+      extractBgFromElement(parent, `parent-${i + 1}`);
+      parent = parent.parentElement;
+    }
+
+    // Extract CSS background images from all descendants
+    let bgDescendantCount = 0;
+    container.querySelectorAll('*').forEach((el, idx) => {
+      const computed = window.getComputedStyle(el);
+      if (computed.backgroundImage && computed.backgroundImage !== 'none') {
+        bgDescendantCount++;
+      }
+      extractBgFromElement(el, `descendant-${idx}`);
+    });
+    debugLogs.push(`[BG] Found ${bgDescendantCount} descendants with background-image`);
+
+    return { images, debugLogs };
   }, { selector, baseUrl });
+
+  // Log debug info from browser context
+  console.log('=== Background Image Extraction Debug ===');
+  result.debugLogs.forEach(log => console.log(log));
+  console.log(`=== Total images found: ${result.images.length} ===`);
+
+  return result.images;
 }
 
 /**

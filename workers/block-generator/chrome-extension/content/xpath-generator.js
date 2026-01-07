@@ -179,12 +179,66 @@
   }
 
   /**
+   * Extract background images from an element and its ancestors/descendants
+   */
+  function extractBackgroundImages(element) {
+    const images = [];
+    const seenUrls = new Set();
+
+    function addBgImage(url, source) {
+      if (url && !seenUrls.has(url)) {
+        seenUrls.add(url);
+        // Resolve relative URLs
+        try {
+          const resolvedUrl = new URL(url, window.location.href).href;
+          images.push({ src: resolvedUrl, alt: 'Background', role: 'background', source });
+        } catch (e) {
+          images.push({ src: url, alt: 'Background', role: 'background', source });
+        }
+      }
+    }
+
+    function extractFromElement(el, source) {
+      const computed = window.getComputedStyle(el);
+      const bgImage = computed.backgroundImage;
+
+      if (bgImage && bgImage !== 'none') {
+        // Extract all URLs from background-image
+        const urlMatches = bgImage.matchAll(/url\(['"]?([^'")\s]+)['"]?\)/g);
+        for (const match of urlMatches) {
+          addBgImage(match[1], source);
+        }
+      }
+    }
+
+    // Check the element itself
+    extractFromElement(element, 'container');
+
+    // Check ancestors (up to 5 levels)
+    let parent = element.parentElement;
+    for (let i = 0; i < 5 && parent && parent !== document.body; i++) {
+      extractFromElement(parent, `parent-${i + 1}`);
+      parent = parent.parentElement;
+    }
+
+    // Check descendants
+    element.querySelectorAll('*').forEach((el, idx) => {
+      extractFromElement(el, `descendant-${idx}`);
+    });
+
+    return images;
+  }
+
+  /**
    * Get element info including XPath, CSS selector, and HTML
    */
   function getElementInfo(element) {
     const xpath = generateXPath(element);
     const cssSelector = generateCssSelector(element);
     const rect = element.getBoundingClientRect();
+
+    // Extract background images from CSS
+    const backgroundImages = extractBackgroundImages(element);
 
     return {
       xpath,
@@ -199,6 +253,7 @@
         devicePixelRatio: window.devicePixelRatio || 1,
       },
       isValid: validateXPath(xpath, element),
+      backgroundImages, // NEW: CSS background images
     };
   }
 

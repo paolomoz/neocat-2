@@ -52,6 +52,29 @@ import { getDAToken, clearCachedToken } from './da-token-service';
 import puppeteer, { Page } from '@cloudflare/puppeteer';
 
 /**
+ * Resolve GitHub token from request or environment
+ * When useServerToken is true, always use the server-side token
+ */
+function resolveGitHubToken(
+  github: { token?: string | null; useServerToken?: boolean } | undefined,
+  env: Env
+): string | undefined {
+  // If useServerToken flag is set, always use server token
+  if (github?.useServerToken) {
+    console.log('Using server-side GitHub token (useServerToken flag set)');
+    return env.GITHUB_TOKEN;
+  }
+  // Otherwise, use client token if provided, fall back to server token
+  const token = github?.token || env.GITHUB_TOKEN;
+  if (github?.token) {
+    console.log('Using client-provided GitHub token');
+  } else if (env.GITHUB_TOKEN) {
+    console.log('Using server-side GitHub token (fallback)');
+  }
+  return token;
+}
+
+/**
  * Convert ArrayBuffer to base64 string without stack overflow
  * Uses chunked approach to handle large files
  */
@@ -1157,8 +1180,40 @@ async function generateBlockFromScreenshotEnhanced(
         let liveImages: ExtractedImage[] = [];
         try {
           console.log('Extracting live images from rendered page...');
+          console.log('Using selector:', selector);
+
+          // Ensure CSS is fully loaded by waiting a moment and scrolling to the element
+          await page.evaluate((sel) => {
+            const el = document.querySelector(sel);
+            if (el) el.scrollIntoView({ behavior: 'instant', block: 'center' });
+          }, selector);
+          await new Promise(resolve => setTimeout(resolve, 500)); // Wait for any CSS transitions
+
           liveImages = await extractLiveImages(page, selector, url);
-          console.log(`Found ${liveImages.length} live images`);
+          console.log(`Found ${liveImages.length} live images:`);
+          liveImages.forEach((img, i) => {
+            console.log(`  [IMG_${i + 1}] role=${img.role}, src=${img.src.substring(0, 100)}`);
+          });
+
+          // Debug: Check if there are ANY background images on the page
+          const bgDebug = await page.evaluate((sel) => {
+            const results: string[] = [];
+            const container = document.querySelector(sel);
+            if (!container) return ['Container not found'];
+
+            // Check container and ancestors
+            let el: Element | null = container;
+            for (let i = 0; i < 5 && el; i++) {
+              const bg = window.getComputedStyle(el).backgroundImage;
+              if (bg && bg !== 'none') {
+                results.push(`Level ${i} (${el.tagName}.${el.className.split(' ')[0]}): ${bg.substring(0, 80)}`);
+              }
+              el = el.parentElement;
+            }
+            return results.length > 0 ? results : ['No background images found on container or ancestors'];
+          }, selector);
+          console.log('Background image debug:', bgDebug);
+
         } catch (imgError) {
           console.warn('Live image extraction failed:', imgError);
         }
@@ -1643,7 +1698,7 @@ async function handleComposePage(request: Request, env: Env): Promise<Response> 
     }
 
     // GitHub info is required for creating page-import branch
-    const githubToken = body.github?.token || env.GITHUB_TOKEN;
+    const githubToken = resolveGitHubToken(body.github, env);
     if (!body.github?.owner || !body.github?.repo) {
       return Response.json(
         { success: false, error: 'Missing required fields: github.owner, github.repo' },
@@ -1972,7 +2027,7 @@ async function handlePageFinalize(request: Request, env: Env): Promise<Response>
       );
     }
 
-    const githubToken = body.github?.token || env.GITHUB_TOKEN;
+    const githubToken = resolveGitHubToken(body.github, env);
     if (!githubToken) {
       return Response.json(
         { success: false, error: 'GitHub token not provided and GITHUB_TOKEN env not configured' },
@@ -2075,7 +2130,7 @@ async function handleGenerateBlockForSection(request: Request, env: Env): Promis
       );
     }
 
-    const githubToken = body.github?.token || env.GITHUB_TOKEN;
+    const githubToken = resolveGitHubToken(body.github, env);
     if (!githubToken) {
       return Response.json(
         { success: false, error: 'GitHub token not provided' },
@@ -2464,6 +2519,7 @@ interface GenerateBlockCoreParams {
   html: string;
   xpath: string;
   anthropicConfig: AnthropicConfig;
+  extensionBackgroundImages?: ExtractedImage[];
 }
 
 interface GenerateBlockCoreResult {
@@ -2474,12 +2530,19 @@ interface GenerateBlockCoreResult {
 }
 
 async function generateBlockCore(params: GenerateBlockCoreParams): Promise<GenerateBlockCoreResult> {
-  const { browser, url, xpath, anthropicConfig } = params;
+  const { browser, url, xpath, anthropicConfig, extensionBackgroundImages } = params;
   let { screenshotBase64, html } = params;
 
   let extractedCssStyles: string | undefined;
   let liveImages: ExtractedImage[] = [];
   let screenshotMediaType: 'image/png' | 'image/jpeg' = 'image/png';
+
+  // Start with background images from extension (if provided)
+  // These are extracted directly from CSS computed styles by the extension
+  if (extensionBackgroundImages && extensionBackgroundImages.length > 0) {
+    console.log(`Using ${extensionBackgroundImages.length} background images from extension`);
+    liveImages = [...extensionBackgroundImages];
+  }
 
   // Compress screenshot if too large for Claude API (5MB limit)
   const compressed = await compressImageIfNeeded(browser, screenshotBase64);
@@ -2530,13 +2593,24 @@ async function generateBlockCore(params: GenerateBlockCoreParams): Promise<Gener
       }
     }
 
-    // Extract live images
+    // Extract live images and merge with extension background images
     try {
       console.log('Extracting live images from page...');
-      liveImages = await extractLiveImages(page, 'body', url);
-      console.log(`Found ${liveImages.length} live images`);
+      const pageImages = await extractLiveImages(page, 'body', url);
+      console.log(`Found ${pageImages.length} live images from page`);
+
+      // Merge with extension images, avoiding duplicates
+      const seenUrls = new Set(liveImages.map(img => img.src));
+      for (const img of pageImages) {
+        if (!seenUrls.has(img.src)) {
+          liveImages.push(img);
+          seenUrls.add(img.src);
+        }
+      }
+      console.log(`Total images after merge: ${liveImages.length}`);
     } catch (imgError) {
       console.warn('Live image extraction failed:', imgError);
+      // Keep extension background images even if page extraction fails
     }
 
     // Extract computed styles from the page
@@ -2602,6 +2676,23 @@ async function handleBlockGenerate(request: Request, env: Env): Promise<Response
     const screenshotFile = formData.get('screenshot') as File;
     const html = formData.get('html') as string;
     const xpath = formData.get('xpath') as string;
+    const backgroundImagesJson = formData.get('backgroundImages') as string;
+
+    // Parse background images from extension (CSS background-image URLs)
+    let extensionBackgroundImages: ExtractedImage[] = [];
+    if (backgroundImagesJson) {
+      try {
+        const parsed = JSON.parse(backgroundImagesJson);
+        extensionBackgroundImages = parsed.map((img: { src: string; alt?: string; role?: string }) => ({
+          src: img.src,
+          alt: img.alt || 'Background',
+          role: (img.role || 'background') as 'photo' | 'background' | 'icon',
+        }));
+        console.log(`Received ${extensionBackgroundImages.length} background images from extension`);
+      } catch (e) {
+        console.warn('Failed to parse backgroundImages:', e);
+      }
+    }
 
     // Validate required fields with specific messages
     const missing: string[] = [];
@@ -2647,6 +2738,7 @@ async function handleBlockGenerate(request: Request, env: Env): Promise<Response
           html,
           xpath,
           anthropicConfig,
+          extensionBackgroundImages,
         });
       } finally {
         await browser.close();
@@ -3914,7 +4006,7 @@ function handleBlockTestUI(env: Env): Response {
             html: block.html,
             css: block.css,
             js: block.js,
-            github: config.github,
+            github: { ...config.github, useServerToken: true },
             da: config.da
           })
         });
@@ -4706,7 +4798,7 @@ function handleBlockTestUI(env: Env): Response {
             sessionId: sessionId,
             blockName: winnerBlock.blockName || 'block',
             winner: selectedWinner,
-            github: config.github,
+            github: { ...config.github, useServerToken: true },
             da: config.da,
             cleanup: true
           })
@@ -6853,7 +6945,7 @@ async function handleBlockVariantPush(request: Request, env: Env): Promise<Respo
     if (!body.da?.site) missing.push('da.site');
 
     // GitHub token: use request token or fall back to env
-    const githubToken = body.github?.token || env.GITHUB_TOKEN;
+    const githubToken = resolveGitHubToken(body.github, env);
     if (!githubToken) missing.push('github.token (or GITHUB_TOKEN env)');
 
     if (missing.length > 0) {
@@ -7024,7 +7116,7 @@ async function handleBlockFinalize(request: Request, env: Env): Promise<Response
     if (!body.github?.repo) missing.push('github.repo');
 
     // GitHub token: use request token or fall back to env
-    const githubToken = body.github?.token || env.GITHUB_TOKEN;
+    const githubToken = resolveGitHubToken(body.github, env);
     if (!githubToken) missing.push('github.token (or GITHUB_TOKEN env)');
 
     if (missing.length > 0) {
@@ -7175,7 +7267,7 @@ async function handleBlockCleanup(request: Request, env: Env): Promise<Response>
     if (!body.github?.repo) missing.push('github.repo');
 
     // GitHub token: use request token or fall back to env
-    const githubToken = body.github?.token || env.GITHUB_TOKEN;
+    const githubToken = resolveGitHubToken(body.github, env);
     if (!githubToken) missing.push('github.token (or GITHUB_TOKEN env)');
 
     if (missing.length > 0) {
@@ -7456,7 +7548,7 @@ async function handleDesignSystemImport(request: Request, env: Env): Promise<Res
     if (!body.url) missing.push('url');
 
     // GitHub config only required if not dryRun
-    const githubToken = body.github?.token || env.GITHUB_TOKEN;
+    const githubToken = resolveGitHubToken(body.github, env);
     if (!body.dryRun) {
       if (!body.github?.owner) missing.push('github.owner');
       if (!body.github?.repo) missing.push('github.repo');
@@ -7829,7 +7921,7 @@ async function handleDesignSystemFinalize(request: Request, env: Env): Promise<R
     if (!body.github?.repo) missing.push('github.repo');
 
     // GitHub token: use request token or fall back to env
-    const githubToken = body.github?.token || env.GITHUB_TOKEN;
+    const githubToken = resolveGitHubToken(body.github, env);
     if (!githubToken) missing.push('github.token (or GITHUB_TOKEN env)');
 
     if (missing.length > 0) {

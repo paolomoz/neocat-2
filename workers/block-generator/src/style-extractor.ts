@@ -256,7 +256,39 @@ export function formatStylesForPrompt(styles: ExtractedStyles): string {
     lines.push(formatStyleObject(styles.links[0].styles, ['background-color', 'color', 'border-radius', 'padding', 'border', 'font-weight', 'font-size']));
   }
 
+  // Background image styles - CRITICAL for decorative background patterns
+  const containerBgStyles = extractBackgroundStyles(styles.container.styles);
+  const cardBgStyles = styles.cards.length > 0 ? extractBackgroundStyles(styles.cards[0].styles) : null;
+
+  if (containerBgStyles || cardBgStyles) {
+    lines.push('\n### Background Image Styles (for decorative patterns/shapes)');
+    if (containerBgStyles) {
+      lines.push('Container background:');
+      lines.push(containerBgStyles);
+    }
+    if (cardBgStyles) {
+      lines.push('Card/Item background:');
+      lines.push(cardBgStyles);
+    }
+  }
+
   return lines.join('\n');
+}
+
+/**
+ * Extract background-related styles for decorative images
+ */
+function extractBackgroundStyles(styles: Record<string, string>): string | null {
+  const bgProps = ['background-image', 'background-size', 'background-position', 'background-repeat'];
+  const lines: string[] = [];
+
+  for (const prop of bgProps) {
+    if (styles[prop] && styles[prop] !== 'none' && styles[prop] !== 'auto' && styles[prop] !== 'repeat') {
+      lines.push(`  ${prop}: ${styles[prop]}`);
+    }
+  }
+
+  return lines.length > 0 ? lines.join('\n') : null;
 }
 
 /**

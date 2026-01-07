@@ -376,6 +376,9 @@
     console.log('AEM Block Importer: Selection mode deactivated');
   }
 
+  // Track overlay state for screenshot capture
+  let overlayHiddenForScreenshot = false;
+
   // Listen for messages from background
   chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     switch (message.type) {
@@ -392,6 +395,30 @@
           activate();
         }
         console.log('AEM Block Importer: Section selection mode activated');
+        sendResponse({ success: true });
+        break;
+
+      case 'HIDE_OVERLAY_FOR_SCREENSHOT':
+        // Hide the selection overlay before screenshot capture
+        // This prevents the overlay color from polluting the screenshot
+        if (overlay && overlay.style.display !== 'none') {
+          overlay.style.display = 'none';
+          overlayHiddenForScreenshot = true;
+          console.log('Selector overlay hidden for screenshot capture');
+        }
+        if (tooltip && tooltip.style.display !== 'none') {
+          tooltip.style.display = 'none';
+        }
+        sendResponse({ success: true });
+        break;
+
+      case 'RESTORE_OVERLAY_AFTER_SCREENSHOT':
+        // Restore the overlay after screenshot capture
+        if (overlayHiddenForScreenshot && overlay && isActive) {
+          overlay.style.display = 'block';
+          console.log('Selector overlay restored after screenshot capture');
+        }
+        overlayHiddenForScreenshot = false;
         sendResponse({ success: true });
         break;
     }

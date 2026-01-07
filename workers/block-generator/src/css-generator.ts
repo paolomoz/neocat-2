@@ -63,9 +63,9 @@ function generateGridCSS(blockName: string, itemCount: number): string {
 
 .${blockName}-card-image picture,
 .${blockName}-card-image img {
-  width: 100%;
-  aspect-ratio: 16 / 9;
-  object-fit: cover;
+  max-width: 100%;
+  width: auto;
+  height: auto;
 }
 
 .${blockName}-card-body {
@@ -114,7 +114,8 @@ function generateColumnsCSS(blockName: string, columnCount: number): string {
 
 .${blockName}-img-col picture,
 .${blockName}-img-col img {
-  width: 100%;
+  max-width: 100%;
+  width: auto;
   height: auto;
   border-radius: 8px;
 }
@@ -225,7 +226,8 @@ function generateMediaTextCSS(blockName: string): string {
 
 .${blockName}-media picture,
 .${blockName}-media img {
-  width: 100%;
+  max-width: 100%;
+  width: auto;
   height: auto;
   border-radius: 8px;
 }
@@ -581,7 +583,8 @@ function generateDefaultCSS(blockName: string): string {
 
 .${blockName}-img-col picture,
 .${blockName}-img-col img {
-  width: 100%;
+  max-width: 100%;
+  width: auto;
   height: auto;
   border-radius: 8px;
 }

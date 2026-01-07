@@ -44,6 +44,147 @@ export interface EnhancedBlockCode {
 }
 
 /**
+ * Attempt to repair malformed JSON from Claude responses
+ * Common issues: unescaped quotes, literal newlines, trailing commas
+ */
+function repairJson(jsonStr: string): string {
+  let repaired = jsonStr;
+
+  // Remove any BOM or invisible characters at the start
+  repaired = repaired.replace(/^\uFEFF/, '').trim();
+
+  // Fix common issue: literal newlines in string values
+  // This regex finds strings and replaces literal newlines with \n
+  repaired = repaired.replace(
+    /"([^"\\]*(?:\\.[^"\\]*)*)"/g,
+    (match) => {
+      // Replace literal newlines with escaped newlines within strings
+      return match
+        .replace(/\n/g, '\\n')
+        .replace(/\r/g, '\\r')
+        .replace(/\t/g, '\\t');
+    }
+  );
+
+  // Fix trailing commas before } or ]
+  repaired = repaired.replace(/,(\s*[}\]])/g, '$1');
+
+  return repaired;
+}
+
+/**
+ * Extract block code fields using regex as fallback when JSON parsing fails
+ * This is more resilient to malformed JSON
+ */
+function extractFieldsWithRegex(response: string): { blockName: string; html: string; css: string; js: string } | null {
+  // Extract blockName - should be a simple string
+  const blockNameMatch = response.match(/"blockName"\s*:\s*"([^"]+)"/);
+  if (!blockNameMatch) return null;
+
+  // Extract each code field by finding the field and its content
+  // These fields typically contain multi-line code, so we use a more careful extraction
+  const extractField = (fieldName: string): string => {
+    // Find the start of the field
+    const fieldPattern = new RegExp(`"${fieldName}"\\s*:\\s*"`, 'i');
+    const fieldMatch = response.match(fieldPattern);
+    if (!fieldMatch || fieldMatch.index === undefined) return '';
+
+    const startIndex = fieldMatch.index + fieldMatch[0].length;
+    let result = '';
+    let i = startIndex;
+    let escaped = false;
+
+    // Walk through character by character to find the closing quote
+    while (i < response.length) {
+      const char = response[i];
+
+      if (escaped) {
+        result += char;
+        escaped = false;
+      } else if (char === '\\') {
+        result += char;
+        escaped = true;
+      } else if (char === '"') {
+        // Found the closing quote
+        break;
+      } else {
+        result += char;
+      }
+      i++;
+    }
+
+    // Unescape the result
+    try {
+      return JSON.parse(`"${result}"`);
+    } catch {
+      // If unescaping fails, return raw with basic unescaping
+      return result
+        .replace(/\\n/g, '\n')
+        .replace(/\\r/g, '\r')
+        .replace(/\\t/g, '\t')
+        .replace(/\\"/g, '"')
+        .replace(/\\\\/g, '\\');
+    }
+  };
+
+  return {
+    blockName: blockNameMatch[1],
+    html: extractField('html'),
+    css: extractField('css'),
+    js: extractField('js'),
+  };
+}
+
+/**
+ * Parse Claude's JSON response with multiple fallback strategies
+ */
+function parseBlockCodeResponse(response: string): { blockName: string; html: string; css: string; js: string } {
+  // Strategy 1: Try to find and parse JSON code block
+  let jsonStr: string | null = null;
+  const codeBlockMatch = response.match(/```(?:json)?\s*([\s\S]*?)```/);
+  if (codeBlockMatch) {
+    jsonStr = codeBlockMatch[1].trim();
+  } else {
+    // Try to find raw JSON object
+    const jsonMatch = response.match(/\{[\s\S]*"blockName"[\s\S]*\}/);
+    if (jsonMatch) jsonStr = jsonMatch[0];
+  }
+
+  if (!jsonStr) {
+    throw new Error(`No JSON block found in Claude response. Response starts with: ${response.substring(0, 200)}`);
+  }
+
+  // Strategy 2: Try direct JSON parsing
+  try {
+    const parsed = JSON.parse(jsonStr);
+    return parsed;
+  } catch (directError) {
+    console.log('Direct JSON parse failed, attempting repair...');
+
+    // Strategy 3: Try with repaired JSON
+    try {
+      const repaired = repairJson(jsonStr);
+      const parsed = JSON.parse(repaired);
+      console.log('JSON repair successful');
+      return parsed;
+    } catch (repairError) {
+      console.log('JSON repair failed, attempting regex extraction...');
+
+      // Strategy 4: Extract fields individually with regex
+      const extracted = extractFieldsWithRegex(response);
+      if (extracted && extracted.blockName && extracted.html) {
+        console.log('Regex extraction successful');
+        return extracted;
+      }
+
+      // All strategies failed - throw the original error with context
+      const errorMsg = directError instanceof Error ? directError.message : String(directError);
+      throw new Error(`Failed to parse generated block code: ${errorMsg}`);
+    }
+  }
+}
+
+/**
  * Step 1: Describe the component in detail
  */
 export async function describeComponent(
@@ -431,6 +572,12 @@ DO NOT clear innerHTML. DO NOT expect multiple rows per item. DO NOT use type/va
    - Example: <img data-img-ref="1" alt="Logo">
    - NEVER write src="..." - I will inject real URLs
    - NEVER invent, guess, or use placeholder URLs
+   - **IMAGE SIZING - CRITICAL**: Images must display at their ORIGINAL/NATURAL size to match the source design:
+     * Use CSS: max-width: none; width: auto; height: auto; to preserve original dimensions
+     * DO NOT force aspect-ratio or object-fit: cover on images unless the design clearly crops them
+     * For logos, badges, icons, and decorative images: let them render at natural size
+     * Only use width: 100% if the image is clearly meant to fill its container (like hero backgrounds)
+     * If an image has a specific size in the original (e.g., app store badges at 180px), set that exact width
 7. **CTA/LINK STYLING - CRITICAL**: EDS renders isolated <a> tags as buttons by default (with background, padding, border-radius).
    - If EXTRACTED CSS VALUES section above includes "Button/CTA Styles", use those EXACT colors.
    - DO NOT guess button colors from the screenshot - use the extracted hex values.
@@ -445,7 +592,21 @@ DO NOT clear innerHTML. DO NOT expect multiple rows per item. DO NOT use type/va
    - For internal card/item elements: use background-color: #fff (white) ONLY if needed for visual separation
    - DO NOT look at the screenshot and think "the section is light green so I'll add light green background" - this is WRONG
    - Section backgrounds are controlled separately via section metadata, NOT in block CSS.
-9. **INTERACTIVE ELEMENTS - CRITICAL**:
+9. **BACKGROUND IMAGES (decorative patterns/shapes) - CRITICAL**:
+   - If the AVAILABLE IMAGES list includes images with role "(background)", these are CSS background-image patterns (waves, shapes, decorations)
+   - These MUST be included as <img> elements in the HTML (NOT as CSS background-image) so they can be authored and saved
+   - Use data-img-ref to reference them like any other image: <img data-img-ref="N" alt="" class="{block-name}-bg-image">
+   - Position them as decorative backgrounds using CSS:
+     * Use position: absolute with appropriate top/left/right/bottom values
+     * Set z-index: 0 or -1 to place behind content
+     * Use pointer-events: none so they don't interfere with interactions
+     * Match the original background-size and background-position from the source
+   - The parent container needs position: relative to contain the absolute positioned background image
+   - Example pattern:
+     HTML: <div class="block-name"><img data-img-ref="1" alt="" class="block-name-bg">...</div>
+     CSS: .block-name { position: relative; } .block-name-bg { position: absolute; top: 0; left: 0; width: 48%; height: 95%; object-fit: contain; z-index: 0; pointer-events: none; }
+   - This is DIFFERENT from section backgrounds - these are decorative images that ARE part of the block design
+10. **INTERACTIVE ELEMENTS - CRITICAL**:
    - If the component has carousel/slider navigation (prev/next arrows, pagination dots), the JS MUST make them functional.
    - Carousel pattern requirements:
      * Implement click handlers for prev/next navigation buttons
@@ -471,21 +632,8 @@ Return ONLY the JSON object.`;
   const response = await callClaude(screenshotBase64, prompt, config, imageMediaType, 8192);
 
   try {
-    // Try code block first
-    let jsonStr: string | null = null;
-    const codeBlockMatch = response.match(/```(?:json)?\s*([\s\S]*?)```/);
-    if (codeBlockMatch) {
-      jsonStr = codeBlockMatch[1].trim();
-    } else {
-      const jsonMatch = response.match(/\{[\s\S]*"blockName"[\s\S]*\}/);
-      if (jsonMatch) jsonStr = jsonMatch[0];
-    }
-
-    if (!jsonStr) {
-      throw new Error(`No JSON block found in Claude response. Response starts with: ${response.substring(0, 200)}`);
-    }
-
-    const parsed = JSON.parse(jsonStr);
+    // Use resilient parsing with multiple fallback strategies
+    const parsed = parseBlockCodeResponse(response);
 
     // Validate required fields
     if (!parsed.blockName) {

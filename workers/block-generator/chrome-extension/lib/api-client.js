@@ -17,11 +17,12 @@ const ApiClient = {
   },
 
   /**
-   * Generate block from screenshot and xpath
+   * Generate block from screenshot and xpath (with refinements)
    *
-   * POST /block-generate
+   * POST /block-generate-full
+   * Returns { success, iterations: [{ iteration, blockName, html, css, js }, ...] }
    */
-  async generateBlock({ url, screenshot, xpath, html }) {
+  async generateBlock({ url, screenshot, xpath, html, backgroundImages, refinements = 2 }) {
     const workerUrl = await this.getWorkerUrl();
 
     // Detailed debug logging
@@ -32,10 +33,13 @@ const ApiClient = {
     console.log('  screenshot size:', screenshot?.size);
     console.log('  xpath:', xpath);
     console.log('  html:', html ? `${html.substring(0, 100)}... (${html.length} chars)` : 'MISSING');
+    console.log('  backgroundImages:', backgroundImages?.length || 0);
+    console.log('  refinements:', refinements);
     console.log('=====================================');
 
     const formData = new FormData();
     formData.append('url', url);
+    formData.append('refinements', String(refinements));
 
     if (screenshot && screenshot.size > 0) {
       formData.append('screenshot', screenshot, 'element.png');
@@ -58,13 +62,19 @@ const ApiClient = {
       console.warn('⚠ HTML not provided');
     }
 
+    // Send background images extracted from CSS
+    if (backgroundImages && backgroundImages.length > 0) {
+      formData.append('backgroundImages', JSON.stringify(backgroundImages));
+      console.log('✓ Background images appended:', backgroundImages.length);
+    }
+
     if (!xpath && !html) {
       console.error('✗ CRITICAL: Both xpath and html are missing - request will fail!');
     }
 
-    console.log('Sending request to:', `${workerUrl}/block-generate`);
+    console.log('Sending request to:', `${workerUrl}/block-generate-full`);
 
-    const response = await fetch(`${workerUrl}/block-generate`, {
+    const response = await fetch(`${workerUrl}/block-generate-full`, {
       method: 'POST',
       body: formData,
     });
@@ -117,7 +127,7 @@ const ApiClient = {
         html,
         css,
         js,
-        github,
+        github: { ...github, useServerToken: true },
         da,
       }),
     });
@@ -147,9 +157,43 @@ const ApiClient = {
         sessionId,
         blockName,
         winner,
-        github,
+        github: { ...github, useServerToken: true },
         da,
       }),
+    });
+
+    if (!response.ok) {
+      const error = await response.json().catch(() => ({}));
+      throw new Error(error.error || `HTTP ${response.status}`);
+    }
+
+    return response.json();
+  },
+
+  /**
+   * Select winner from multiple block variants using Claude Vision
+   *
+   * POST /block-winner
+   */
+  async selectWinner({ screenshot, variants }) {
+    const workerUrl = await this.getWorkerUrl();
+
+    const formData = new FormData();
+    formData.append('screenshot', screenshot, 'original.png');
+    formData.append('blocks', JSON.stringify(variants.map((v, i) => ({
+      html: v.html,
+      css: v.css,
+      js: v.js,
+      blockName: v.blockName,
+      optionIndex: i,
+      previewUrl: v.previewUrl,
+    }))));
+
+    console.log('[ApiClient.selectWinner] Comparing', variants.length, 'variants');
+
+    const response = await fetch(`${workerUrl}/block-winner`, {
+      method: 'POST',
+      body: formData,
     });
 
     if (!response.ok) {

@@ -8,6 +8,7 @@ workers/block-collector/node_modules/*
 import-work/images/*
 
 workers/block-generator/.wrangler/tmp/*
+workers/block-generator/tests/test-output/*
 
 helix-importer-ui
 .DS_Store

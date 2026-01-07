@@ -12,6 +12,20 @@
 importScripts('../lib/state-manager.js', '../lib/api-client.js', '../lib/github-client.js');
 
 /**
+ * Build GitHub config object from stored config
+ * Includes useServerToken flag for default repo
+ */
+function buildGitHubConfig(config) {
+  const [owner, repo] = (config.githubRepo || '').split('/');
+  return {
+    owner,
+    repo,
+    token: config.githubToken || null,
+    useServerToken: config.useServerToken || false,
+  };
+}
+
+/**
  * Keepalive mechanism for long-running operations
  * MV3 service workers get killed after ~30s of inactivity
  */
@@ -89,8 +103,8 @@ async function injectSidebar(tabId) {
 /**
  * Handle block generation from sidebar (element already selected)
  */
-async function handleGenerateBlockFromSidebar(url, elementData, sessionId) {
-  console.log('handleGenerateBlockFromSidebar:', { url, sessionId });
+async function handleGenerateBlockFromSidebar(url, elementData, sessionId, senderTab = null) {
+  console.log('handleGenerateBlockFromSidebar:', { url, sessionId, senderTabId: senderTab?.id });
   console.log('=== elementData DEBUG ===');
   console.log('  elementData:', elementData);
   console.log('  elementData.html:', elementData?.html ? `${elementData.html.substring(0, 100)}... (${elementData.html.length} chars)` : 'MISSING');
@@ -102,7 +116,22 @@ async function handleGenerateBlockFromSidebar(url, elementData, sessionId) {
 
   try {
     const config = await StateManager.getConfig();
-    const tab = await findTargetTab();
+    // Use sender tab if provided, otherwise fall back to findTargetTab
+    const tab = senderTab || await findTargetTab();
+    console.log('[handleGenerateBlockFromSidebar] Using tab:', tab?.id, tab?.url, senderTab ? '(from sender)' : '(from findTargetTab)');
+
+    // CRITICAL: Hide the selection overlay before capturing screenshot
+    // The overlay can pollute the screenshot with its green/blue tint
+    if (tab) {
+      console.log('Hiding selection overlay before screenshot...');
+      try {
+        await chrome.tabs.sendMessage(tab.id, { type: 'HIDE_OVERLAY_FOR_SCREENSHOT' });
+        // Small delay to ensure DOM update is complete
+        await new Promise(resolve => setTimeout(resolve, 50));
+      } catch (e) {
+        console.log('Could not hide overlay (may not be present):', e.message);
+      }
+    }
 
     // Capture screenshot
     console.log('Capturing visible tab screenshot...');
@@ -111,6 +140,15 @@ async function handleGenerateBlockFromSidebar(url, elementData, sessionId) {
       quality: 100,
     });
     console.log('Full screenshot captured, length:', fullScreenshot?.length);
+
+    // Restore the overlay after screenshot (for multi-selection mode)
+    if (tab) {
+      try {
+        await chrome.tabs.sendMessage(tab.id, { type: 'RESTORE_OVERLAY_AFTER_SCREENSHOT' });
+      } catch (e) {
+        console.log('Could not restore overlay:', e.message);
+      }
+    }
 
     // Crop screenshot in content script if we have bounds
     let screenshotBlob;
@@ -134,50 +172,205 @@ async function handleGenerateBlockFromSidebar(url, elementData, sessionId) {
     console.log('  screenshot blob size:', screenshotBlob?.size);
     console.log('  html:', elementData?.html ? `${elementData.html.length} chars` : 'MISSING');
     console.log('  xpath:', elementData?.xpath || 'not provided');
+    console.log('  backgroundImages:', elementData?.backgroundImages?.length || 0);
 
-    const generateResult = await ApiClient.generateBlock({
-      url,
-      screenshot: screenshotBlob,
-      html: elementData?.html,
-      xpath: elementData?.xpath,
-    });
+    // Generate 3 options in parallel, no refinements (just 1 iteration each) = 3 total variants
+    const NUM_OPTIONS = 3;
+    console.log(`[handleGenerateBlockFromSidebar] Generating ${NUM_OPTIONS} options in parallel (no refinements)...`);
 
-    if (!generateResult.success) {
-      throw new Error(generateResult.error || 'Block generation failed');
+    // Notify sidebar that generation is starting with variant grid
+    console.log('[handleGenerateBlockFromSidebar] tab:', tab?.id, tab?.url);
+    if (tab) {
+      try {
+        console.log('[handleGenerateBlockFromSidebar] Sending GENERATION_STARTED to tab', tab.id);
+        await chrome.tabs.sendMessage(tab.id, {
+          type: 'GENERATION_STARTED',
+          sessionId,
+          numOptions: NUM_OPTIONS,
+          iterationsPerOption: 1,
+        });
+        console.log('[handleGenerateBlockFromSidebar] GENERATION_STARTED sent successfully');
+      } catch (e) {
+        console.log('Could not send GENERATION_STARTED message:', e.message);
+      }
+    } else {
+      console.log('[handleGenerateBlockFromSidebar] WARNING: tab is null, cannot send GENERATION_STARTED');
     }
 
-    // Push variant for preview
-    const previewResult = await ApiClient.pushBlockVariant({
-      sessionId,
-      blockName: generateResult.blockName,
-      html: generateResult.html,
-      css: generateResult.css,
-      js: generateResult.js,
-      github: {
-        owner: config.githubRepo.split('/')[0],
-        repo: config.githubRepo.split('/')[1],
-        token: config.githubToken || null,
-      },
-      da: {
-        org: config.daOrg,
-        site: config.daSite,
-      },
-    });
+    const optionPromises = [];
+    for (let optionNum = 1; optionNum <= NUM_OPTIONS; optionNum++) {
+      optionPromises.push(
+        ApiClient.generateBlock({
+          url,
+          screenshot: screenshotBlob,
+          html: elementData?.html,
+          xpath: elementData?.xpath,
+          backgroundImages: elementData?.backgroundImages || [],
+          refinements: 0, // No refinements, just 1 generation per option
+        }).then(result => ({ optionNum, result }))
+         .catch(err => ({ optionNum, error: err.message }))
+      );
+    }
 
-    const variant = previewResult.variant || {};
-    const previewUrl = variant.previewUrl ||
-      `https://${variant.branch || 'main'}--${config.daSite}--${config.daOrg}.aem.live${variant.daPath || `/preview/${generateResult.blockName}`}`;
+    const optionResults = await Promise.all(optionPromises);
+
+    // Collect all variants from all options
+    const allVariants = [];
+
+    for (const { optionNum, result, error } of optionResults) {
+      if (error) {
+        console.error(`[handleGenerateBlockFromSidebar] Option ${optionNum} failed:`, error);
+        continue;
+      }
+
+      if (!result.success) {
+        console.error(`[handleGenerateBlockFromSidebar] Option ${optionNum} failed:`, result.error);
+        continue;
+      }
+
+      const iterations = result.iterations || [];
+      console.log(`[handleGenerateBlockFromSidebar] Option ${optionNum}: got ${iterations.length} iterations`);
+
+      // Push a variant for each iteration
+      for (let i = 0; i < iterations.length; i++) {
+        const iter = iterations[i];
+        const iterationNum = i + 1;
+
+        console.log(`[handleGenerateBlockFromSidebar] Pushing variant ${optionNum}-${iterationNum}...`);
+
+        try {
+          const previewResult = await ApiClient.pushBlockVariant({
+            sessionId,
+            blockName: iter.blockName,
+            html: iter.html,
+            css: iter.css,
+            js: iter.js,
+            github: buildGitHubConfig(config),
+            da: {
+              org: config.daOrg,
+              site: config.daSite,
+            },
+            option: optionNum,
+            iteration: iterationNum,
+          });
+
+          const variant = previewResult.variant || {};
+          const variantData = {
+            option: optionNum,
+            iteration: iterationNum,
+            blockName: iter.blockName,
+            html: iter.html,
+            css: iter.css,
+            js: iter.js,
+            previewUrl: variant.previewUrl,
+            branch: variant.branch,
+          };
+          allVariants.push(variantData);
+
+          console.log(`[handleGenerateBlockFromSidebar] Pushed variant: ${variant.branch}`);
+
+          // Notify sidebar that this variant is ready
+          if (tab) {
+            try {
+              await chrome.tabs.sendMessage(tab.id, {
+                type: 'VARIANT_READY',
+                sessionId,
+                variant: variantData,
+              });
+            } catch (e) {
+              console.log('Could not send VARIANT_READY message:', e.message);
+            }
+          }
+        } catch (err) {
+          console.error(`[handleGenerateBlockFromSidebar] Failed to push variant ${optionNum}-${iterationNum}:`, err);
+        }
+      }
+    }
+
+    if (allVariants.length === 0) {
+      throw new Error('Failed to generate any variants');
+    }
+
+    console.log(`[handleGenerateBlockFromSidebar] Total variants pushed: ${allVariants.length}`);
+
+    // Select winner using Claude Vision comparison
+    let winner = allVariants[allVariants.length - 1]; // Default to last if winner selection fails
+    let winnerInfo = { reasoning: 'Default selection (last variant)', confidence: 0, scores: [] };
+
+    try {
+      console.log(`[handleGenerateBlockFromSidebar] Selecting winner from ${allVariants.length} variants...`);
+
+      // Notify sidebar that winner selection is in progress
+      if (tab) {
+        try {
+          await chrome.tabs.sendMessage(tab.id, {
+            type: 'SELECTING_WINNER',
+            sessionId,
+            numVariants: allVariants.length,
+          });
+        } catch (e) {
+          console.log('Could not send SELECTING_WINNER message:', e.message);
+        }
+      }
+
+      const winnerResult = await ApiClient.selectWinner({
+        screenshot: screenshotBlob,
+        variants: allVariants,
+      });
+
+      if (winnerResult.success && winnerResult.winner) {
+        const winnerIndex = winnerResult.winner.optionIndex;
+        if (winnerIndex >= 0 && winnerIndex < allVariants.length) {
+          winner = allVariants[winnerIndex];
+          winnerInfo = {
+            reasoning: winnerResult.reasoning || 'Selected by Claude Vision',
+            confidence: winnerResult.confidence || 0,
+            scores: winnerResult.scores || [],
+          };
+          console.log(`[handleGenerateBlockFromSidebar] Winner selected: ${winner.option}-${winner.iteration} (confidence: ${winnerInfo.confidence}%)`);
+
+          // Notify sidebar of winner selection
+          if (tab) {
+            try {
+              await chrome.tabs.sendMessage(tab.id, {
+                type: 'WINNER_SELECTED',
+                sessionId,
+                winner: {
+                  option: winner.option,
+                  iteration: winner.iteration,
+                  reasoning: winnerInfo.reasoning,
+                  confidence: winnerInfo.confidence,
+                },
+              });
+            } catch (e) {
+              console.log('Could not send WINNER_SELECTED message:', e.message);
+            }
+          }
+        }
+      }
+    } catch (err) {
+      console.error('[handleGenerateBlockFromSidebar] Winner selection failed, using default:', err.message);
+    }
 
     stopKeepalive();
 
     return {
       success: true,
-      blockName: generateResult.blockName,
-      html: generateResult.html,
-      css: generateResult.css,
-      js: generateResult.js,
-      previewUrl,
-      branch: variant.branch,
+      blockName: winner.blockName,
+      html: winner.html,
+      css: winner.css,
+      js: winner.js,
+      previewUrl: winner.previewUrl,
+      branch: winner.branch,
+      winner: {
+        option: winner.option,
+        iteration: winner.iteration,
+        reasoning: winnerInfo.reasoning,
+        confidence: winnerInfo.confidence,
+        scores: winnerInfo.scores,
+      },
+      variants: allVariants, // All 9 variants for UI to display
+      sessionId,
     };
   } catch (error) {
     console.error('Block generation from sidebar failed:', error);
@@ -296,6 +489,17 @@ async function handleElementSelected(tabId, data) {
     const tab = await chrome.tabs.get(tabId);
     const url = tab.url;
 
+    // CRITICAL: Hide the selection overlay before capturing screenshot
+    // The overlay can pollute the screenshot with its green/blue tint
+    console.log('Hiding selection overlay before screenshot...');
+    try {
+      await chrome.tabs.sendMessage(tabId, { type: 'HIDE_OVERLAY_FOR_SCREENSHOT' });
+      // Small delay to ensure DOM update is complete
+      await new Promise(resolve => setTimeout(resolve, 50));
+    } catch (e) {
+      console.log('Could not hide overlay (may not be present):', e.message);
+    }
+
     // Capture screenshot
     const fullScreenshot = await chrome.tabs.captureVisibleTab(null, {
       format: 'png',
@@ -366,11 +570,7 @@ async function handleElementSelected(tabId, data) {
       html: generateResult.html,
       css: generateResult.css,
       js: generateResult.js,
-      github: {
-        owner: config.githubRepo.split('/')[0],
-        repo: config.githubRepo.split('/')[1],
-        token: config.githubToken || null,
-      },
+      github: buildGitHubConfig(config),
       da: {
         org: config.daOrg,
         site: config.daSite,
@@ -438,19 +638,15 @@ async function handleElementSelected(tabId, data) {
 /**
  * Handle block acceptance (merge)
  */
-async function handleAcceptBlock(sessionId, blockName, branch) {
+async function handleAcceptBlock(sessionId, blockName, branch, option = 1, iteration = 1) {
   try {
     const config = await StateManager.getConfig();
 
     await ApiClient.finalizeBlock({
       sessionId,
       blockName,
-      winner: { option: 1, iteration: 1 }, // Single variant flow uses option 1
-      github: {
-        owner: config.githubRepo.split('/')[0],
-        repo: config.githubRepo.split('/')[1],
-        token: config.githubToken || null,
-      },
+      winner: { option, iteration },
+      github: buildGitHubConfig(config),
       da: {
         org: config.daOrg,
         site: config.daSite,
@@ -498,11 +694,7 @@ async function handleDesignSystemImport(url) {
       url,
       sessionId,
       generatePreview: true,
-      github: {
-        owner: config.githubRepo.split('/')[0],
-        repo: config.githubRepo.split('/')[1],
-        token: config.githubToken || null,
-      },
+      github: buildGitHubConfig(config),
       da: {
         org: config.daOrg,
         site: config.daSite,
@@ -572,11 +764,7 @@ async function handleFinalizeDesignSystem(branch) {
 
     await ApiClient.finalizeDesignSystem({
       branch,
-      github: {
-        owner: config.githubRepo.split('/')[0],
-        repo: config.githubRepo.split('/')[1],
-        token: config.githubToken || null,
-      },
+      github: buildGitHubConfig(config),
     });
 
     return { success: true };
@@ -617,11 +805,7 @@ async function handleComposePage(url, sections, pageTitle, acceptedBlocks) {
       pageTitle,
       sessionId,
       acceptedBlocks: acceptedBlocks || {},
-      github: {
-        owner: config.githubRepo.split('/')[0],
-        repo: config.githubRepo.split('/')[1],
-        token: config.githubToken || null,
-      },
+      github: buildGitHubConfig(config),
       da: {
         org: config.daOrg,
         site: config.daSite,
@@ -657,11 +841,7 @@ async function handleFinalizePage(branch) {
 
     const result = await ApiClient.finalizePage({
       branch,
-      github: {
-        owner: config.githubRepo.split('/')[0],
-        repo: config.githubRepo.split('/')[1],
-        token: config.githubToken || null,
-      },
+      github: buildGitHubConfig(config),
     });
 
     console.log('finalizePage result:', result);
@@ -688,11 +868,7 @@ async function handleRejectPage(branch) {
 
     const result = await ApiClient.rejectPage({
       branch,
-      github: {
-        owner: config.githubRepo.split('/')[0],
-        repo: config.githubRepo.split('/')[1],
-        token: config.githubToken || null,
-      },
+      github: buildGitHubConfig(config),
     });
 
     return { success: true };
@@ -727,11 +903,7 @@ async function handleGenerateBlockForSection(url, section, sectionIndex) {
       yStart: section.yStart,
       yEnd: section.yEnd,
       sessionId,
-      github: {
-        owner: config.githubRepo.split('/')[0],
-        repo: config.githubRepo.split('/')[1],
-        token: config.githubToken || null,
-      },
+      github: buildGitHubConfig(config),
       da: {
         org: config.daOrg,
         site: config.daSite,
@@ -895,7 +1067,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       }
 
       case 'ACCEPT_BLOCK': {
-        return handleAcceptBlock(message.sessionId, message.blockName, message.branch);
+        return handleAcceptBlock(message.sessionId, message.blockName, message.branch, message.option, message.iteration);
       }
 
       case 'REJECT_BLOCK': {
@@ -963,8 +1135,8 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 
       case 'GENERATE_BLOCK': {
         // Generate block from sidebar element selection
-        console.log('GENERATE_BLOCK received:', message.url, message.sessionId);
-        return handleGenerateBlockFromSidebar(message.url, message.elementData, message.sessionId);
+        console.log('GENERATE_BLOCK received:', message.url, message.sessionId, 'from tab:', sender.tab?.id);
+        return handleGenerateBlockFromSidebar(message.url, message.elementData, message.sessionId, sender.tab);
       }
 
       default:
