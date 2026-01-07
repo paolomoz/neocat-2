@@ -287,10 +287,12 @@ Analyze the visual differences and provide REFINED code that will make the gener
 2. **NEVER change image URLs** - The image sources must remain identical
 3. **NEVER change link URLs** - All href values must stay the same
 4. **Only modify CSS and HTML structure** - Fix styling, not content
-5. **BACKGROUND COLORS**:
-   - Do NOT add background-color to the block container itself
-   - For cards/items: use background-color: #fff (white) or omit entirely
-   - Only add non-white backgrounds if clearly visible in the original design
+5. **BACKGROUND COLORS - ABSOLUTELY CRITICAL**:
+   - NEVER add background-color or background to the block container (.{block-name}) - THIS WILL BREAK THE DESIGN
+   - The colored section background (light blue, green, gray, etc.) in the original is NOT part of the block
+   - Section backgrounds are controlled by AEM section metadata - do NOT replicate them in block CSS
+   - For internal card/item elements: use background-color: #fff (white) ONLY if needed for visual separation
+   - If you think "the section needs a light green background" - STOP, that is WRONG
 6. **INTERACTIVE ELEMENTS**:
    - If the original has carousel navigation (arrows, dots), ensure the JS makes them functional
    - Navigation must use click handlers, not just visual elements

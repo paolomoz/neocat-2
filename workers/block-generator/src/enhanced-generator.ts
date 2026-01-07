@@ -437,11 +437,13 @@ DO NOT clear innerHTML. DO NOT expect multiple rows per item. DO NOT use type/va
    - If the original shows TEXT LINKS (no background): override EDS defaults with background: none; border: none; padding: 0;
    - If the original shows BUTTONS: use the EXACT background-color from extracted styles (e.g., #133C8F not a guess).
    - Screenshots can have color shifts - extracted computed styles are always more accurate.
-8. **BACKGROUND COLORS - CRITICAL**:
-   - DO NOT add background-color to the block container itself.
-   - For cards/items inside the block: use background-color: #fff (white) or omit entirely.
-   - DO NOT guess background colors from screenshots - screenshots can have color inaccuracies.
-   - Only add non-white backgrounds to cards if the extracted CSS styles explicitly show a non-white color.
+8. **BACKGROUND COLORS - ABSOLUTELY CRITICAL**:
+   - NEVER add background-color or background to the block container (.{block-name}) - THIS WILL BREAK THE DESIGN
+   - The light blue, light green, gray, or other colored section background you see in the screenshot is NOT part of the block
+   - That section background is controlled by AEM section metadata - it is NOT your responsibility to replicate it
+   - Your block CSS must work on ANY background color - use background: transparent or OMIT background entirely on the block
+   - For internal card/item elements: use background-color: #fff (white) ONLY if needed for visual separation
+   - DO NOT look at the screenshot and think "the section is light green so I'll add light green background" - this is WRONG
    - Section backgrounds are controlled separately via section metadata, NOT in block CSS.
 9. **INTERACTIVE ELEMENTS - CRITICAL**:
    - If the component has carousel/slider navigation (prev/next arrows, pagination dots), the JS MUST make them functional.

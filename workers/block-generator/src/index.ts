@@ -330,6 +330,11 @@ export default {
       return handleBlockGenerate(request, env);
     }
 
+    // Block generate full endpoint (initial + refinements in single browser session)
+    if (url.pathname === '/block-generate-full' && request.method === 'POST') {
+      return handleBlockGenerateFull(request, env);
+    }
+
     // Block refine endpoint (iterative refinement with pixelmatch)
     if (url.pathname === '/block-refine' && request.method === 'POST') {
       return handleBlockRefine(request, env);
@@ -862,6 +867,7 @@ DESCRIPTION: ${sectionDescription}
 4. The generated block MUST contain the same content as the original - same headings, same paragraphs, same links
 5. **NO WRAPPER BACKGROUNDS** - Do NOT add background-color to .{block-name}-wrapper selectors. EDS wraps blocks automatically. Only style the block element itself and its children.
 6. **BUTTON COLORS**: Extract the EXACT button background-color from the HTML/CSS. DO NOT guess colors from screenshots - use the actual hex values from inline styles or class definitions in the extracted HTML.
+7. **ABSOLUTELY NO BLOCK-LEVEL BACKGROUNDS** - This is MANDATORY: NEVER add background-color, background, or any background styling to the block container (.{block-name}) or section. The section's background (whether light blue, green, gray, etc.) is controlled by section metadata in AEM, NOT by block CSS. If you add a background to the block, it will BREAK the design. Only internal elements like cards may have backgrounds (e.g., .card-item { background: #fff; }).
 
 ## EXTRACTED HTML FROM THE PAGE (this is the actual content - use it!)
 
@@ -903,8 +909,13 @@ The **CSS** styles the **rendered output** (what decorate() produces), NOT the a
 
 - Style ONLY the block class and its children: .{block-name}, .{block-name} .child-element
 - NEVER style -wrapper or -container selectors (EDS adds these automatically)
-- **NO BLOCK BACKGROUNDS**: Do NOT add background-color to the block itself. Section backgrounds are controlled via section metadata, not block CSS. Use background: transparent; or omit background entirely.
-- The ONLY exception for backgrounds: internal elements like card items within the block (e.g., .card-item { background: #fff; })
+- **CRITICAL - NO BLOCK BACKGROUNDS**:
+  * NEVER add background-color or background to .{block-name} selector
+  * The colored section background you see in the screenshot is NOT part of the block - it's section metadata
+  * If the section appears light blue, light green, gray, etc. - IGNORE IT, do not replicate it in CSS
+  * Your block CSS must work on ANY background color
+  * Use background: transparent; or simply OMIT any background property on the block
+- The ONLY exception for backgrounds: internal card/item elements inside the block (e.g., .card-item { background: #fff; })
 
 ## Return Format
 
@@ -2443,6 +2454,143 @@ async function handlePreview(request: Request, env: Env): Promise<Response> {
 }
 
 /**
+ * Core block generation logic - reusable with an existing browser instance
+ * This is the extracted core from handleBlockGenerate for use in batch operations
+ */
+interface GenerateBlockCoreParams {
+  browser: ReturnType<typeof puppeteer.launch> extends Promise<infer T> ? T : never;
+  url: string;
+  screenshotBase64: string;
+  html: string;
+  xpath: string;
+  anthropicConfig: AnthropicConfig;
+}
+
+interface GenerateBlockCoreResult {
+  block: BlockCode;
+  screenshotBase64: string;
+  screenshotMediaType: 'image/png' | 'image/jpeg';
+  liveImages: ExtractedImage[];
+}
+
+async function generateBlockCore(params: GenerateBlockCoreParams): Promise<GenerateBlockCoreResult> {
+  const { browser, url, xpath, anthropicConfig } = params;
+  let { screenshotBase64, html } = params;
+
+  let extractedCssStyles: string | undefined;
+  let liveImages: ExtractedImage[] = [];
+  let screenshotMediaType: 'image/png' | 'image/jpeg' = 'image/png';
+
+  // Compress screenshot if too large for Claude API (5MB limit)
+  const compressed = await compressImageIfNeeded(browser, screenshotBase64);
+  screenshotBase64 = compressed.data;
+  screenshotMediaType = compressed.mediaType;
+
+  // Try to navigate and extract additional data (CSS, images, HTML via XPath)
+  // This is optional - if navigation fails but we have html, we can continue
+  let pageNavigationSucceeded = false;
+  let page: Awaited<ReturnType<typeof browser.newPage>> | null = null;
+
+  try {
+    page = await browser.newPage();
+    await page.setViewport({ width: 1440, height: 900 });
+    await page.goto(url, { waitUntil: 'networkidle0', timeout: 30000 });
+    pageNavigationSucceeded = true;
+
+    // Dismiss cookie banners
+    await dismissCookieBanners(page);
+
+    // If xpath is provided, extract HTML from that element
+    if (xpath && !html) {
+      try {
+        console.log(`Extracting HTML from XPath: ${xpath}`);
+        const extractedHtml = await page.evaluate((xpathExpr: string) => {
+          const result = document.evaluate(
+            xpathExpr,
+            document,
+            null,
+            XPathResult.FIRST_ORDERED_NODE_TYPE,
+            null
+          );
+          const element = result.singleNodeValue as Element;
+          if (element) {
+            return element.outerHTML;
+          }
+          return null;
+        }, xpath);
+
+        if (extractedHtml) {
+          html = extractedHtml;
+          console.log(`Extracted HTML from XPath (${html.length} chars)`);
+        } else {
+          console.warn(`No element found at XPath: ${xpath}`);
+        }
+      } catch (xpathError) {
+        console.warn('XPath extraction failed:', xpathError);
+      }
+    }
+
+    // Extract live images
+    try {
+      console.log('Extracting live images from page...');
+      liveImages = await extractLiveImages(page, 'body', url);
+      console.log(`Found ${liveImages.length} live images`);
+    } catch (imgError) {
+      console.warn('Live image extraction failed:', imgError);
+    }
+
+    // Extract computed styles from the page
+    try {
+      console.log('Extracting computed CSS styles...');
+      const styles = await extractComputedStyles(browser, url, 'body');
+      extractedCssStyles = formatStylesForPrompt(styles);
+    } catch (styleError) {
+      console.warn('Style extraction failed:', styleError);
+    }
+  } catch (navigationError) {
+    console.warn('Page navigation failed, continuing without extraction:', navigationError);
+    // If we already have html, we can continue without the extracted data
+  } finally {
+    if (page) {
+      try {
+        await page.close();
+      } catch (e) {
+        // Ignore close errors
+      }
+    }
+  }
+
+  // Validate we have html
+  if (!html) {
+    throw new BlockGeneratorError('Could not extract HTML from provided xpath', 'PARSE_ERROR', 400);
+  }
+
+  // Generate block using the enhanced generator
+  console.log(`Generating block with Claude Vision... (mediaType=${screenshotMediaType})`);
+  const enhancedBlock = await generateBlockEnhanced(
+    screenshotBase64,
+    html,
+    url,
+    anthropicConfig,
+    extractedCssStyles,
+    liveImages,
+    screenshotMediaType
+  );
+
+  return {
+    block: {
+      html: enhancedBlock.html,
+      css: enhancedBlock.css,
+      js: enhancedBlock.js,
+      blockName: enhancedBlock.blockName,
+    },
+    screenshotBase64,
+    screenshotMediaType,
+    liveImages,
+  };
+}
+
+/**
  * Handles the block-generate endpoint
  * Accepts multipart form data with screenshot, URL, and HTML
  */
@@ -2452,7 +2600,7 @@ async function handleBlockGenerate(request: Request, env: Env): Promise<Response
 
     const url = formData.get('url') as string;
     const screenshotFile = formData.get('screenshot') as File;
-    let html = formData.get('html') as string;
+    const html = formData.get('html') as string;
     const xpath = formData.get('xpath') as string;
 
     // Validate required fields with specific messages
@@ -2486,117 +2634,46 @@ async function handleBlockGenerate(request: Request, env: Env): Promise<Response
 
     // Convert screenshot File to base64 (chunk-based to avoid stack overflow)
     const arrayBuffer = await screenshotFile.arrayBuffer();
-    let screenshotBase64 = arrayBufferToBase64(arrayBuffer);
+    const screenshotBase64 = arrayBufferToBase64(arrayBuffer);
 
-    // Launch Puppeteer to extract CSS and live images from the page
-    let extractedCssStyles: string | undefined;
-    let liveImages: ExtractedImage[] = [];
-
-    let screenshotMediaType: 'image/png' | 'image/jpeg' = 'image/png';
-
+    let result: GenerateBlockCoreResult;
     try {
       const browser = await launchBrowserWithRetry(env.BROWSER);
       try {
-        // Compress screenshot if too large for Claude API (5MB limit)
-        const compressed = await compressImageIfNeeded(browser, screenshotBase64);
-        screenshotBase64 = compressed.data;
-        screenshotMediaType = compressed.mediaType;
-
-        const page = await browser.newPage();
-        await page.setViewport({ width: 1440, height: 900 });
-        await page.goto(url, { waitUntil: 'networkidle0', timeout: 30000 });
-
-        // Dismiss cookie banners
-        await dismissCookieBanners(page);
-
-        // If xpath is provided, extract HTML from that element
-        if (xpath && !html) {
-          try {
-            console.log(`Extracting HTML from XPath: ${xpath}`);
-            const extractedHtml = await page.evaluate((xpathExpr: string) => {
-              const result = document.evaluate(
-                xpathExpr,
-                document,
-                null,
-                XPathResult.FIRST_ORDERED_NODE_TYPE,
-                null
-              );
-              const element = result.singleNodeValue as Element;
-              if (element) {
-                return element.outerHTML;
-              }
-              return null;
-            }, xpath);
-
-            if (extractedHtml) {
-              html = extractedHtml;
-              console.log(`Extracted HTML from XPath (${html.length} chars)`);
-            } else {
-              console.warn(`No element found at XPath: ${xpath}`);
-            }
-          } catch (xpathError) {
-            console.warn('XPath extraction failed:', xpathError);
-          }
-        }
-
-        // Extract live images - use xpath selector if available, otherwise whole page
-        const imageSelector = xpath ? 'body' : 'body';
-        try {
-          console.log('Extracting live images from page...');
-          liveImages = await extractLiveImages(page, imageSelector, url);
-          console.log(`Found ${liveImages.length} live images`);
-        } catch (imgError) {
-          console.warn('Live image extraction failed:', imgError);
-        }
-
-        // Extract computed styles from the page
-        try {
-          console.log('Extracting computed CSS styles...');
-          const styles = await extractComputedStyles(browser, url, 'body');
-          extractedCssStyles = formatStylesForPrompt(styles);
-        } catch (styleError) {
-          console.warn('Style extraction failed:', styleError);
-        }
-
-        await page.close();
+        result = await generateBlockCore({
+          browser,
+          url,
+          screenshotBase64,
+          html,
+          xpath,
+          anthropicConfig,
+        });
       } finally {
         await browser.close();
       }
     } catch (browserError) {
-      console.warn('Browser operations failed, continuing without:', browserError);
-    }
-
-    // Final validation - we need html at this point
-    if (!html) {
+      if (browserError instanceof BlockGeneratorError) {
+        throw browserError;
+      }
+      const errorMessage = browserError instanceof Error ? browserError.message : String(browserError);
+      console.error('Browser operations failed:', errorMessage, browserError);
       return Response.json(
-        { success: false, error: 'Could not extract HTML from provided xpath', code: 'EXTRACTION_FAILED' },
-        { status: 400, headers: corsHeaders(env) }
+        { success: false, error: `Browser operations failed: ${errorMessage}`, code: 'BROWSER_ERROR' },
+        { status: 500, headers: corsHeaders(env) }
       );
     }
-
-    // Generate block using the enhanced generator
-    console.log(`Generating block with Claude Vision... (mediaType=${screenshotMediaType})`);
-    const enhancedBlock = await generateBlockEnhanced(
-      screenshotBase64,
-      html,
-      url,
-      anthropicConfig,
-      extractedCssStyles,
-      liveImages,
-      screenshotMediaType
-    );
 
     // Build response
     const response: BlockResponse = {
       success: true,
-      blockName: enhancedBlock.blockName,
-      layoutPattern: enhancedBlock.componentType as any || 'unknown',
-      html: enhancedBlock.html,
-      js: enhancedBlock.js,
-      css: enhancedBlock.css,
+      blockName: result.block.blockName || 'block',
+      layoutPattern: 'unknown',
+      html: result.block.html,
+      js: result.block.js,
+      css: result.block.css,
       metadata: {
         elementCount: 0,
-        hasImages: liveImages.length > 0,
+        hasImages: result.liveImages.length > 0,
         hasHeadings: true,
         hasLinks: true,
         rowCount: 1,
@@ -2605,6 +2682,116 @@ async function handleBlockGenerate(request: Request, env: Env): Promise<Response
     };
 
     return Response.json(response, { status: 200, headers: corsHeaders(env) });
+  } catch (error) {
+    return handleError(error, env);
+  }
+}
+
+/**
+ * Handles the block-generate-full endpoint
+ * Generates initial block + 2 refinements in a single browser session
+ * This reduces browser session usage from 3 sessions to 1 per option
+ */
+async function handleBlockGenerateFull(request: Request, env: Env): Promise<Response> {
+  try {
+    const formData = await request.formData();
+
+    const url = formData.get('url') as string;
+    const screenshotFile = formData.get('screenshot') as File;
+    const html = formData.get('html') as string;
+    const xpath = formData.get('xpath') as string;
+    const refinementCount = parseInt(formData.get('refinements') as string || '2', 10);
+
+    // Validate required fields
+    const missing: string[] = [];
+    if (!url) missing.push('url');
+    if (!screenshotFile) missing.push('screenshot');
+    if (!html && !xpath) missing.push('html or xpath');
+
+    if (missing.length > 0) {
+      return Response.json(
+        { success: false, error: `Missing required fields: ${missing.join(', ')}`, code: 'INVALID_REQUEST' },
+        { status: 400, headers: corsHeaders(env) }
+      );
+    }
+
+    // Get Anthropic config
+    const anthropicConfig = getAnthropicConfig(env);
+    if (!anthropicConfig) {
+      return Response.json(
+        { success: false, error: 'Anthropic API not configured', code: 'INTERNAL_ERROR' },
+        { status: 500, headers: corsHeaders(env) }
+      );
+    }
+
+    if (!env.BROWSER) {
+      return Response.json(
+        { success: false, error: 'Browser Rendering not configured', code: 'INTERNAL_ERROR' },
+        { status: 500, headers: corsHeaders(env) }
+      );
+    }
+
+    // Convert screenshot File to base64
+    const arrayBuffer = await screenshotFile.arrayBuffer();
+    const screenshotBase64 = arrayBufferToBase64(arrayBuffer);
+
+    const iterations: BlockCode[] = [];
+
+    try {
+      const browser = await launchBrowserWithRetry(env.BROWSER);
+      try {
+        // Step 1: Generate initial block
+        console.log('[block-generate-full] Generating initial block...');
+        const initialResult = await generateBlockCore({
+          browser,
+          url,
+          screenshotBase64,
+          html,
+          xpath,
+          anthropicConfig,
+        });
+        iterations.push(initialResult.block);
+
+        // Step 2: Refinement iterations (reusing the same browser session)
+        let currentBlock = initialResult.block;
+        for (let i = 0; i < refinementCount; i++) {
+          console.log(`[block-generate-full] Refinement ${i + 1}/${refinementCount}...`);
+          const refinedResult = await refineBlock(
+            browser,
+            initialResult.screenshotBase64,
+            currentBlock,
+            anthropicConfig,
+            { width: 1440, height: 900 }
+          );
+          currentBlock = refinedResult.block;
+          iterations.push(refinedResult.block);
+        }
+      } finally {
+        await browser.close();
+      }
+    } catch (browserError) {
+      if (browserError instanceof BlockGeneratorError) {
+        throw browserError;
+      }
+      const errorMessage = browserError instanceof Error ? browserError.message : String(browserError);
+      console.error('Browser operations failed:', errorMessage, browserError);
+      return Response.json(
+        { success: false, error: `Browser operations failed: ${errorMessage}`, code: 'BROWSER_ERROR' },
+        { status: 500, headers: corsHeaders(env) }
+      );
+    }
+
+    // Return all iterations
+    return Response.json({
+      success: true,
+      iterations: iterations.map((block, index) => ({
+        iteration: index,
+        blockName: block.blockName,
+        html: block.html,
+        css: block.css,
+        js: block.js,
+      })),
+    }, { status: 200, headers: corsHeaders(env) });
   } catch (error) {
     return handleError(error, env);
   }
@@ -4156,68 +4343,42 @@ function handleBlockTestUI(env: Env): Response {
           const sessionData = await sessionRes.json();
           sessionId = sessionData.sessionId;
           document.getElementById('sessionIdDisplay').textContent = sessionId;
-          setStatus('Session ' + sessionId + ' - Generating 3 options × 3 iterations...', 'loading');
+          setStatus('Session ' + sessionId + ' - Generating 3 options × 3 iterations (3 browser sessions)...', 'loading');
         } catch (e) {
           console.error('Failed to get session ID:', e);
           edsPreviewEnabled = false;
-          setStatus('Generating 3 options × 3 iterations (9 total)...', 'loading');
+          setStatus('Generating 3 options × 3 iterations (3 browser sessions)...', 'loading');
         }
       } else {
         document.getElementById('sessionIdDisplay').textContent = 'Disabled (no GitHub URL)';
-        setStatus('Generating 3 options × 3 iterations (9 total)...', 'loading');
+        setStatus('Generating 3 options × 3 iterations (3 browser sessions)...', 'loading');
       }
       document.getElementById('generateBtn').disabled = true;
       document.getElementById('refineBtn').disabled = true;
       document.getElementById('winnerBtn').disabled = true;
       document.getElementById('winnerResult').style.display = 'none';
 
-      // Helper to generate initial block
-      async function generateInitial(optionIndex) {
+      // Helper to generate all iterations (initial + refinements) in single browser session
+      async function generateFullOption(optionIndex) {
         const formData = new FormData();
         formData.append('url', url);
         formData.append('screenshot', screenshot);
         formData.append('xpath', xpath);
+        formData.append('refinements', '2'); // 2 refinement iterations
 
-        const response = await fetch('/block-generate', { method: 'POST', body: formData });
+        const response = await fetch('/block-generate-full', { method: 'POST', body: formData });
         const responseText = await response.text();
         const result = JSON.parse(responseText);
 
         if (!result.success) throw new Error(result.error);
 
-        return {
-          html: result.html,
-          css: result.css,
-          js: result.js,
-          blockName: result.blockName
-        };
-      }
-
-      // Helper to refine a block
-      async function refineBlock(optionIndex, iterationIndex) {
-        const prevBlock = blocks[optionIndex][iterationIndex - 1];
-        if (!prevBlock || prevBlock.loading) return null;
-
-        const formData = new FormData();
-        formData.append('url', url);
-        formData.append('screenshot', originalScreenshot);
-        formData.append('xpath', xpath);
-        formData.append('blockHtml', prevBlock.html);
-        formData.append('blockCss', prevBlock.css);
-        formData.append('blockJs', prevBlock.js);
-        formData.append('blockName', prevBlock.blockName || 'block');
-
-        const response = await fetch('/block-refine', { method: 'POST', body: formData });
-        const responseText = await response.text();
-        const result = JSON.parse(responseText);
-
-        if (!result.success) throw new Error(result.error);
-
-        return {
-          html: result.html,
-          css: result.css,
-          js: result.js,
-          blockName: result.blockName
-        };
+        // Return all iterations
+        return result.iterations.map(iter => ({
+          html: iter.html,
+          css: iter.css,
+          js: iter.js,
+          blockName: iter.blockName
+        }));
       }
 
       // Update UI for a specific option/iteration
@@ -4246,55 +4407,40 @@ function handleBlockTestUI(env: Env): Response {
         }
       }
 
-      // Process each option: initial + 2 refinements
+      // Process each option: all iterations in single browser session
       const optionPromises = [0, 1, 2].map(async (optionIndex) => {
         try {
-          // Add loading placeholder for iteration 0
+          // Add loading placeholders for all 3 iterations
           updateUI(optionIndex, 0, null, true);
+          updateUI(optionIndex, 1, null, true);
+          updateUI(optionIndex, 2, null, true);
 
-          // Generate initial
-          const initialBlock = await generateInitial(optionIndex);
+          // Generate all iterations in single browser session
+          const allIterations = await generateFullOption(optionIndex);
 
-          // Push to GitHub/DA for EDS preview
-          if (edsPreviewEnabled && sessionId) {
-            const variant = await pushVariant(initialBlock, optionIndex + 1, 1);
-            if (variant) {
-              initialBlock.previewUrl = variant.previewUrl;
-              initialBlock.branch = variant.branch;
-              initialBlock.daPath = variant.daPath;
-            }
-          }
-          updateUI(optionIndex, 0, initialBlock);
+          // Process each iteration result
+          for (let iterIdx = 0; iterIdx < allIterations.length; iterIdx++) {
+            const block = allIterations[iterIdx];
 
-          // Start 2 refinements sequentially (each depends on previous)
-          for (let refineIter = 1; refineIter <= 2; refineIter++) {
-            updateUI(optionIndex, refineIter, null, true);
-            try {
-              const refinedBlock = await refineBlock(optionIndex, refineIter);
-
-              // Push to GitHub/DA for EDS preview
-              if (edsPreviewEnabled && sessionId) {
-                const variant = await pushVariant(refinedBlock, optionIndex + 1, refineIter + 1);
-                if (variant) {
-                  refinedBlock.previewUrl = variant.previewUrl;
-                  refinedBlock.branch = variant.branch;
-                  refinedBlock.daPath = variant.daPath;
-                }
+            // Push to GitHub/DA for EDS preview
+            if (edsPreviewEnabled && sessionId) {
+              const variant = await pushVariant(block, optionIndex + 1, iterIdx + 1);
+              if (variant) {
+                block.previewUrl = variant.previewUrl;
+                block.branch = variant.branch;
+                block.daPath = variant.daPath;
               }
-              updateUI(optionIndex, refineIter, refinedBlock);
-            } catch (refineError) {
-              console.error('Refine error for option ' + optionIndex + ' iter ' + refineIter + ':', refineError);
-              // Remove the loading placeholder on error
-              blocks[optionIndex].pop();
-              updateIterationTabs();
-              break; // Stop further refinements for this option
             }
+            updateUI(optionIndex, iterIdx, block);
           }
 
           return { success: true, optionIndex };
         } catch (error) {
           console.error('Generation error for option ' + optionIndex + ':', error);
           updateUI(optionIndex, 0, null, false, true);
+          // Clear loading placeholders on error
+          blocks[optionIndex] = [];
+          updateIterationTabs();
           return { success: false, optionIndex, error: error.message };
         }
       });
