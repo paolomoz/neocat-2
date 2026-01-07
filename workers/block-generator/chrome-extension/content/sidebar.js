@@ -20,6 +20,8 @@
     STATE: 'aem_importer_state',
   };
 
+  const DEFAULT_GITHUB_REPO = 'paolomoz/neocat-default-repo';
+
   const VIEWS = {
     SETUP: 'setup',
     DASHBOARD: 'dashboard',
@@ -120,6 +122,20 @@
             <input type="text" id="aem-github-repo" placeholder="owner/repo or GitHub URL">
             <small>Your AEM Edge Delivery project</small>
           </div>
+          <div class="aem-form-group aem-token-group aem-hidden" id="aem-token-group">
+            <label>GitHub Token <span class="aem-required">*</span></label>
+            <div class="aem-token-input-wrapper">
+              <input type="password" id="aem-github-token" placeholder="github_pat_xxxxxxxxxxxx">
+              <button type="button" id="aem-toggle-token" class="aem-toggle-btn" title="Show/hide token">
+                <span class="aem-eye-icon">&#128065;</span>
+              </button>
+            </div>
+            <small class="aem-token-help">
+              <a href="https://github.com/settings/personal-access-tokens/new" target="_blank">Create fine-grained token</a> with:<br>
+              • Repository access: Select your repo<br>
+              • Permissions → Contents: <strong>Read and write</strong>
+            </small>
+          </div>
           <button id="aem-save-config" class="aem-btn aem-btn-primary aem-btn-full">Connect</button>
           <div id="aem-setup-status" class="aem-status aem-hidden"></div>
         </div>
@@ -130,7 +146,7 @@
 
           <div class="aem-dashboard-actions">
             <button id="aem-select-blocks-btn" class="aem-action-btn">
-              <span class="aem-action-icon">&#128218;</span>
+              <span class="aem-action-icon"><svg viewBox="0 0 20 20" width="24" height="24" fill="currentColor"><path d="M16.75,3H3.25c-1.24023,0-2.25,1.00977-2.25,2.25v9.5c0,1.24023,1.00977,2.25,2.25,2.25h13.5c1.24023,0,2.25-1.00977,2.25-2.25V5.25c0-1.24023-1.00977-2.25-2.25-2.25ZM17.5,5.25v4h-4v-4.75h3.25c.41309,0,.75.33691.75.75ZM8,9.25v-4.75h4v4.75h-4ZM12,10.75v4.75h-4v-4.75h4ZM3.25,4.5h3.25v4.75H2.5v-4c0-.41309.33691-.75.75-.75ZM2.5,14.75v-4h4v4.75h-3.25c-.41309,0-.75-.33691-.75-.75ZM16.75,15.5h-3.25v-4.75h4v4c0,.41309-.33691.75-.75.75Z"/></svg></span>
               <span class="aem-action-text">
                 <strong>Select Blocks</strong>
                 <small>Generate multiple blocks in parallel</small>
@@ -306,6 +322,8 @@
 
     // Setup
     sidebar.querySelector('#aem-save-config').addEventListener('click', handleSaveConfig);
+    sidebar.querySelector('#aem-github-repo').addEventListener('input', handleRepoInputChange);
+    sidebar.querySelector('#aem-toggle-token').addEventListener('click', toggleTokenVisibility);
 
     // Dashboard
     sidebar.querySelector('#aem-select-blocks-btn').addEventListener('click', startMultiSelection);
@@ -378,6 +396,27 @@
     state.config = await getConfig();
     const savedState = await getState();
 
+    // Pre-fill the GitHub repo input with saved value or default
+    const repoInput = sidebar.querySelector('#aem-github-repo');
+    if (repoInput) {
+      repoInput.value = state.config.githubRepo || DEFAULT_GITHUB_REPO;
+    }
+
+    // Pre-fill and show/hide token field based on repo
+    const tokenInput = sidebar.querySelector('#aem-github-token');
+    const tokenGroup = sidebar.querySelector('#aem-token-group');
+    if (tokenInput && state.config.githubToken) {
+      tokenInput.value = state.config.githubToken;
+    }
+    if (tokenGroup) {
+      const currentRepo = state.config.githubRepo || DEFAULT_GITHUB_REPO;
+      if (isDefaultRepo(currentRepo)) {
+        tokenGroup.classList.add('aem-hidden');
+      } else {
+        tokenGroup.classList.remove('aem-hidden');
+      }
+    }
+
     // Check for pending operations
     if (savedState.status === 'generating') {
       showView(VIEWS.GENERATING);
@@ -434,8 +473,47 @@
 
   // ============ Setup ============
 
+  function isDefaultRepo(repoString) {
+    if (!repoString) return true;
+    const normalized = repoString.toLowerCase().replace(/\.git$/, '');
+    return normalized === DEFAULT_GITHUB_REPO.toLowerCase();
+  }
+
+  function handleRepoInputChange() {
+    const input = sidebar.querySelector('#aem-github-repo').value.trim();
+    const tokenGroup = sidebar.querySelector('#aem-token-group');
+
+    // Parse repo to check if it's the default
+    let repoString = input;
+    const urlMatch = input.match(/github\.com\/([^\/]+)\/([^\/\s]+)/);
+    if (urlMatch) {
+      repoString = `${urlMatch[1]}/${urlMatch[2].replace(/\.git$/, '')}`;
+    }
+
+    // Show token field only for non-default repos
+    if (isDefaultRepo(repoString)) {
+      tokenGroup.classList.add('aem-hidden');
+    } else {
+      tokenGroup.classList.remove('aem-hidden');
+    }
+  }
+
+  function toggleTokenVisibility() {
+    const tokenInput = sidebar.querySelector('#aem-github-token');
+    const eyeIcon = sidebar.querySelector('.aem-eye-icon');
+
+    if (tokenInput.type === 'password') {
+      tokenInput.type = 'text';
+      eyeIcon.innerHTML = '&#128064;'; // Different eye icon for "visible"
+    } else {
+      tokenInput.type = 'password';
+      eyeIcon.innerHTML = '&#128065;'; // Eye icon for "hidden"
+    }
+  }
+
   async function handleSaveConfig() {
     const input = sidebar.querySelector('#aem-github-repo').value.trim();
+    const tokenInput = sidebar.querySelector('#aem-github-token').value.trim();
     const statusEl = sidebar.querySelector('#aem-setup-status');
 
     if (!input) {
@@ -462,12 +540,54 @@
       return;
     }
 
+    const repoString = `${owner}/${repo}`;
+
+    // Require token for non-default repos
+    if (!isDefaultRepo(repoString) && !tokenInput) {
+      showStatus(statusEl, 'GitHub token is required for custom repositories', true);
+      return;
+    }
+
     showStatus(statusEl, 'Connecting...', false);
 
+    // Validate token if provided
+    if (tokenInput) {
+      try {
+        const response = await fetch('https://api.github.com/user', {
+          headers: {
+            'Authorization': `Bearer ${tokenInput}`,
+            'Accept': 'application/vnd.github.v3+json',
+          },
+        });
+
+        if (!response.ok) {
+          showStatus(statusEl, 'Invalid GitHub token', true);
+          return;
+        }
+
+        // Also verify repo access
+        const repoResponse = await fetch(`https://api.github.com/repos/${owner}/${repo}`, {
+          headers: {
+            'Authorization': `Bearer ${tokenInput}`,
+            'Accept': 'application/vnd.github.v3+json',
+          },
+        });
+
+        if (!repoResponse.ok) {
+          showStatus(statusEl, 'Token does not have access to this repository', true);
+          return;
+        }
+      } catch (error) {
+        showStatus(statusEl, 'Failed to validate token: ' + error.message, true);
+        return;
+      }
+    }
+
     await saveConfig({
-      githubRepo: `${owner}/${repo}`,
+      githubRepo: repoString,
       daOrg: owner,
       daSite: repo,
+      githubToken: tokenInput || null, // Store token (null for default repo)
     });
 
     showStatus(statusEl, 'Connected!', false);

@@ -231,6 +231,84 @@
   color: var(--spectrum-gray-600);
 }
 
+.aem-form-group small a {
+  color: var(--spectrum-accent-color-500);
+  text-decoration: none;
+}
+
+.aem-form-group small a:hover {
+  text-decoration: underline;
+}
+
+.aem-form-group small code {
+  background: var(--spectrum-gray-100);
+  padding: 1px 4px;
+  border-radius: 3px;
+  font-size: var(--spectrum-font-size-50);
+}
+
+.aem-form-group input[type="password"] {
+  width: 100%;
+  padding: var(--spectrum-spacing-100) var(--spectrum-spacing-100);
+  padding-right: 36px;
+  border: 1px solid var(--spectrum-gray-400);
+  border-radius: var(--spectrum-radius-100);
+  font-size: var(--spectrum-font-size-100);
+  font-family: inherit;
+  background: var(--spectrum-gray-50);
+  color: var(--spectrum-gray-900);
+  transition: border-color var(--spectrum-animation-duration-100) var(--spectrum-animation-ease),
+              box-shadow var(--spectrum-animation-duration-100) var(--spectrum-animation-ease);
+}
+
+.aem-form-group input[type="password"]:focus {
+  outline: none;
+  border-color: var(--spectrum-accent-color-500);
+  box-shadow: 0 0 0 1px var(--spectrum-accent-color-500);
+}
+
+.aem-token-input-wrapper {
+  position: relative;
+  display: flex;
+  align-items: center;
+}
+
+.aem-toggle-btn {
+  position: absolute;
+  right: 4px;
+  background: none;
+  border: none;
+  padding: 4px 6px;
+  cursor: pointer;
+  opacity: 0.6;
+  transition: opacity var(--spectrum-animation-duration-100);
+}
+
+.aem-toggle-btn:hover {
+  opacity: 1;
+}
+
+.aem-eye-icon {
+  font-size: 16px;
+}
+
+.aem-required {
+  color: var(--spectrum-negative-color-500);
+}
+
+.aem-token-group {
+  transition: opacity var(--spectrum-animation-duration-200),
+              max-height var(--spectrum-animation-duration-200);
+}
+
+.aem-token-help {
+  line-height: 1.6;
+}
+
+.aem-token-help strong {
+  color: var(--spectrum-gray-900);
+}
+
 /* ============ Buttons ============ */
 .aem-btn {
   display: inline-flex;

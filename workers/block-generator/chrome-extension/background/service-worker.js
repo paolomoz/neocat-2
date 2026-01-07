@@ -156,6 +156,7 @@ async function handleGenerateBlockFromSidebar(url, elementData, sessionId) {
       github: {
         owner: config.githubRepo.split('/')[0],
         repo: config.githubRepo.split('/')[1],
+        token: config.githubToken || null,
       },
       da: {
         org: config.daOrg,
@@ -368,6 +369,7 @@ async function handleElementSelected(tabId, data) {
       github: {
         owner: config.githubRepo.split('/')[0],
         repo: config.githubRepo.split('/')[1],
+        token: config.githubToken || null,
       },
       da: {
         org: config.daOrg,
@@ -447,6 +449,7 @@ async function handleAcceptBlock(sessionId, blockName, branch) {
       github: {
         owner: config.githubRepo.split('/')[0],
         repo: config.githubRepo.split('/')[1],
+        token: config.githubToken || null,
       },
       da: {
         org: config.daOrg,
@@ -498,6 +501,7 @@ async function handleDesignSystemImport(url) {
       github: {
         owner: config.githubRepo.split('/')[0],
         repo: config.githubRepo.split('/')[1],
+        token: config.githubToken || null,
       },
       da: {
         org: config.daOrg,
@@ -571,6 +575,7 @@ async function handleFinalizeDesignSystem(branch) {
       github: {
         owner: config.githubRepo.split('/')[0],
         repo: config.githubRepo.split('/')[1],
+        token: config.githubToken || null,
       },
     });
 
@@ -615,6 +620,7 @@ async function handleComposePage(url, sections, pageTitle, acceptedBlocks) {
       github: {
         owner: config.githubRepo.split('/')[0],
         repo: config.githubRepo.split('/')[1],
+        token: config.githubToken || null,
       },
       da: {
         org: config.daOrg,
@@ -654,6 +660,7 @@ async function handleFinalizePage(branch) {
       github: {
         owner: config.githubRepo.split('/')[0],
         repo: config.githubRepo.split('/')[1],
+        token: config.githubToken || null,
       },
     });
 
@@ -684,6 +691,7 @@ async function handleRejectPage(branch) {
       github: {
         owner: config.githubRepo.split('/')[0],
         repo: config.githubRepo.split('/')[1],
+        token: config.githubToken || null,
       },
     });
 
@@ -722,6 +730,7 @@ async function handleGenerateBlockForSection(url, section, sectionIndex) {
       github: {
         owner: config.githubRepo.split('/')[0],
         repo: config.githubRepo.split('/')[1],
+        token: config.githubToken || null,
       },
       da: {
         org: config.daOrg,
