@@ -170,6 +170,7 @@
 /* ============ Content ============ */
 .aem-sidebar-content {
   flex: 1;
+  min-height: 0;
   overflow-y: auto;
   padding: var(--spectrum-spacing-200);
 }
@@ -1113,6 +1114,10 @@
 }
 
 /* ============ Multi-Block Generation View ============ */
+#aem-view-multi-generating {
+  display: block;
+}
+
 .aem-multi-header {
   display: flex;
   justify-content: space-between;
@@ -1142,8 +1147,6 @@
   flex-direction: column;
   gap: var(--spectrum-spacing-100);
   margin-bottom: var(--spectrum-spacing-100);
-  max-height: calc(100vh - 280px);
-  overflow-y: auto;
 }
 
 .aem-multi-empty {

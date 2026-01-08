@@ -1025,18 +1025,45 @@ function injectImageUrlsIntoHtml(
     }
   );
 
+  // Known invalid/placeholder patterns that should always be replaced
+  const invalidPatterns = [
+    'about:error',
+    'about:blank',
+    'javascript:',
+    'data:,',  // empty data URI
+    '[object',
+    'undefined',
+    'null',
+  ];
+
+  function isInvalidSrc(src: string): boolean {
+    if (!src || src.trim() === '') return true;
+    const lower = src.toLowerCase();
+    return invalidPatterns.some(pattern => lower.startsWith(pattern)) ||
+           lower.includes('placeholder') ||
+           lower.includes('example.com') ||
+           lower.includes('via.placeholder') ||
+           lower.includes('picsum') ||
+           lower.includes('unsplash.it') ||
+           lower.includes('lorempixel');
+  }
+
   // Fallback: replace placeholder src values with real URLs
   const usedIndices = new Set<number>();
   let unusedImageIndex = 0;
+  let removedCount = 0;
   result = result.replace(
     /<img([^>]*?)src=["']([^"']*)["']([^>]*?)>/gi,
     (match, before, currentSrc, after) => {
+      // Skip if it's already a real URL from our images
       if (images.some(img => img.src === currentSrc)) return match;
-      if (currentSrc.startsWith('http') &&
-          !currentSrc.includes('placeholder') &&
-          !currentSrc.includes('example.com')) {
+
+      // Skip if it looks like a valid external URL (not placeholder)
+      if (currentSrc.startsWith('http') && !isInvalidSrc(currentSrc)) {
         return match;
       }
+
+      // Try to find an unused image to inject
       while (unusedImageIndex < images.length && usedIndices.has(unusedImageIndex)) {
         unusedImageIndex++;
       }
@@ -1048,11 +1075,24 @@ function injectImageUrlsIntoHtml(
         console.log(`Replaced placeholder "${currentSrc}" with "${img.src}"`);
         return `<img${before} src="${img.src}"${after}>`;
       }
+
+      // No more images available - remove the broken img tag entirely
+      // This prevents displaying broken images with src="about:error"
+      if (isInvalidSrc(currentSrc)) {
+        removedCount++;
+        console.log(`Removed broken image with src="${currentSrc}" (no images available to replace)`);
+        return ''; // Remove the entire img tag
+      }
+
       return match;
     }
   );
 
-  console.log(`Injected ${injectedCount} image URLs into generated HTML`);
+  console.log(`Injected ${injectedCount} image URLs, removed ${removedCount} broken images`);
+
+  // Clean up empty picture elements (when the img inside was removed)
+  result = result.replace(/<picture[^>]*>\s*(<source[^>]*>\s*)*\s*<\/picture>/gi, '');
+
   return result;
 }
 
