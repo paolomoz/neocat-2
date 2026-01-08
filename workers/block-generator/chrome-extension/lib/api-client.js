@@ -17,16 +17,17 @@ const ApiClient = {
   },
 
   /**
-   * Generate block from screenshot and xpath (with refinements)
+   * Generate block from screenshot and xpath using two-step generation
    *
-   * POST /block-generate-full
+   * POST /block-generate-two-step
+   * Uses two-step pipeline: 1) Extract content to JSON, 2) Generate block deterministically
    * Returns { success, iterations: [{ iteration, blockName, html, css, js }, ...] }
    */
-  async generateBlock({ url, screenshot, xpath, html, backgroundImages, refinements = 2 }) {
+  async generateBlock({ url, screenshot, xpath, html, backgroundImages, refinements = 2, mode = 'deterministic' }) {
     const workerUrl = await this.getWorkerUrl();
 
     // Detailed debug logging
-    console.log('=== ApiClient.generateBlock DEBUG ===');
+    console.log('=== ApiClient.generateBlock (Two-Step) DEBUG ===');
     console.log('  url:', url);
     console.log('  screenshot:', screenshot);
     console.log('  screenshot type:', screenshot?.constructor?.name);
@@ -34,12 +35,12 @@ const ApiClient = {
     console.log('  xpath:', xpath);
     console.log('  html:', html ? `${html.substring(0, 100)}... (${html.length} chars)` : 'MISSING');
     console.log('  backgroundImages:', backgroundImages?.length || 0);
-    console.log('  refinements:', refinements);
-    console.log('=====================================');
+    console.log('  mode:', mode);
+    console.log('================================================');
 
     const formData = new FormData();
     formData.append('url', url);
-    formData.append('refinements', String(refinements));
+    formData.append('mode', mode); // deterministic or styled
 
     if (screenshot && screenshot.size > 0) {
       formData.append('screenshot', screenshot, 'element.png');
@@ -72,9 +73,9 @@ const ApiClient = {
       console.error('✗ CRITICAL: Both xpath and html are missing - request will fail!');
     }
 
-    console.log('Sending request to:', `${workerUrl}/block-generate-full`);
+    console.log('Sending request to:', `${workerUrl}/block-generate-two-step`);
 
-    const response = await fetch(`${workerUrl}/block-generate-full`, {
+    const response = await fetch(`${workerUrl}/block-generate-two-step`, {
       method: 'POST',
       body: formData,
     });
@@ -93,7 +94,28 @@ const ApiClient = {
       throw new Error(error.error || `HTTP ${response.status}`);
     }
 
-    return response.json();
+    // Two-step endpoint returns single block, adapt to iterations format for compatibility
+    const result = await response.json();
+
+    if (result.success) {
+      // Wrap single block in iterations array for backward compatibility
+      return {
+        success: true,
+        iterations: [{
+          iteration: 1,
+          blockName: result.blockName,
+          html: result.html,
+          css: result.css,
+          js: result.js,
+        }],
+        // Include extra info from two-step generation
+        contentModel: result.contentModel,
+        validation: result.validation,
+        layoutPattern: result.layoutPattern,
+      };
+    }
+
+    return result;
   },
 
   /**
