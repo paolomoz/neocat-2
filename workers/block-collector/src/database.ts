@@ -531,6 +531,42 @@ export async function getBlocks(
   }));
 }
 
+// Get a single block by ID
+export async function getBlockById(
+  db: D1Database,
+  blockId: string
+): Promise<Block | null> {
+  const query = `
+    SELECT
+      b.*,
+      p.url as page_url,
+      s.domain as site_domain
+    FROM blocks b
+    LEFT JOIN pages p ON b.page_id = p.id
+    LEFT JOIN sites s ON b.site_id = s.id
+    WHERE b.id = ?
+  `;
+
+  const result = await db
+    .prepare(query)
+    .bind(blockId)
+    .first<Block & { page_url?: string; site_domain?: string }>();
+
+  if (!result) return null;
+
+  return {
+    ...result,
+    has_javascript: Boolean(result.has_javascript),
+    has_interactivity: Boolean(result.has_interactivity),
+    design_tokens: parseJSON(result.design_tokens as unknown as string),
+    content_model: parseJSON(result.content_model as unknown as string),
+    css_variables: parseJSON(result.css_variables as unknown as string),
+    quality_breakdown: parseJSON(result.quality_breakdown as unknown as string),
+    page_url: result.page_url || (result.site_domain ? `https://${result.site_domain}/` : undefined),
+    description: generateBlockDescription(result),
+  } as Block & { page_url?: string; description?: string };
+}
+
 // Generate a human-readable description of what the block demonstrates
 function generateBlockDescription(block: Block & { page_url?: string; site_domain?: string }): string {
   const html = block.html || '';

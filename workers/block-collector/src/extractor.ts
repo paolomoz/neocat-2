@@ -5,6 +5,7 @@ import {
   ContentModel,
   ContentModelNode,
   DesignTokens,
+  Env,
 } from './types';
 import {
   getPagesBySite,
@@ -15,6 +16,11 @@ import {
   upsertDesignSystem,
 } from './database';
 import { storeBlock, getPage as getPageFromStorage } from './storage';
+import {
+  upsertBlockEmbedding,
+  generateBlockDescription,
+  EmbeddingInput,
+} from './embeddings';
 
 // ============================================
 // Block Extraction from HTML
@@ -339,21 +345,34 @@ export interface PageExtractionResult {
   pageId: string;
   blocksExtracted: number;
   blocksStored: number;
+  embeddingsGenerated: number;
   errors: string[];
+}
+
+export interface PageExtractionOptions {
+  generateEmbeddings?: boolean;
 }
 
 export async function extractBlocksFromPage(
   db: D1Database,
   bucket: R2Bucket,
   siteId: string,
-  pageId: string
+  pageId: string,
+  env?: Env,
+  options?: PageExtractionOptions
 ): Promise<PageExtractionResult> {
   const result: PageExtractionResult = {
     pageId,
     blocksExtracted: 0,
     blocksStored: 0,
+    embeddingsGenerated: 0,
     errors: [],
   };
+
+  const shouldGenerateEmbeddings =
+    options?.generateEmbeddings !== false &&
+    env?.AI &&
+    env?.VECTOR_INDEX;
 
   // Get page HTML
   const pageData = await getPageFromStorage(bucket, siteId, pageId);
@@ -405,6 +424,42 @@ export async function extractBlocksFromPage(
       });
 
       result.blocksStored++;
+
+      // Generate embedding for semantic search
+      if (shouldGenerateEmbeddings && env) {
+        try {
+          const description = generateBlockDescription({
+            id: blockId,
+            site_id: siteId,
+            page_id: pageId,
+            block_name: block.name,
+            block_variant: block.variant,
+            html: block.html,
+            cleaned_html: block.cleanedHtml,
+            has_javascript: block.hasJavaScript,
+            has_interactivity: block.hasInteractivity,
+            quality_score: null,
+            quality_tier: null,
+          } as Block);
+
+          await upsertBlockEmbedding(env, {
+            blockId,
+            blockName: block.name,
+            html: block.cleanedHtml || block.html,
+            description,
+            qualityTier: 'unrated',
+            qualityScore: 0,
+            siteId,
+          });
+
+          result.embeddingsGenerated++;
+        } catch (embeddingError) {
+          // Don't fail extraction if embedding fails
+          result.errors.push(
+            `Embedding failed for ${block.name}: ${embeddingError}`
+          );
+        }
+      }
     } catch (e) {
       result.errors.push(`Failed to store block ${block.name}: ${e}`);
     }
@@ -422,6 +477,7 @@ export interface SiteExtractionResult {
   pagesProcessed: number;
   totalBlocksExtracted: number;
   totalBlocksStored: number;
+  totalEmbeddingsGenerated: number;
   uniqueBlockTypes: string[];
   errors: string[];
 }
@@ -429,13 +485,16 @@ export interface SiteExtractionResult {
 export async function extractBlocksFromSite(
   db: D1Database,
   bucket: R2Bucket,
-  siteId: string
+  siteId: string,
+  env?: Env,
+  options?: PageExtractionOptions
 ): Promise<SiteExtractionResult> {
   const result: SiteExtractionResult = {
     siteId,
     pagesProcessed: 0,
     totalBlocksExtracted: 0,
     totalBlocksStored: 0,
+    totalEmbeddingsGenerated: 0,
     uniqueBlockTypes: [],
     errors: [],
   };
@@ -447,11 +506,19 @@ export async function extractBlocksFromSite(
 
   for (const page of pages) {
     try {
-      const pageResult = await extractBlocksFromPage(db, bucket, siteId, page.id);
+      const pageResult = await extractBlocksFromPage(
+        db,
+        bucket,
+        siteId,
+        page.id,
+        env,
+        options
+      );
 
       result.pagesProcessed++;
       result.totalBlocksExtracted += pageResult.blocksExtracted;
       result.totalBlocksStored += pageResult.blocksStored;
+      result.totalEmbeddingsGenerated += pageResult.embeddingsGenerated;
       result.errors.push(...pageResult.errors);
     } catch (e) {
       result.errors.push(`Failed to process page ${page.path}: ${e}`);

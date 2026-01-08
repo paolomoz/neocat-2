@@ -7,13 +7,96 @@ import {
   Block,
   QualityTier,
 } from './types';
-import { getBlocks, getBlockStats } from './database';
+import { getBlocks, getBlockStats, getBlockById } from './database';
+import { searchBlocks, SearchResult } from './embeddings';
 
 // Bedrock configuration
 const AWS_REGION = 'us-east-1';
 const BEDROCK_MODEL_ID = 'us.anthropic.claude-opus-4-20250514-v1:0';
 
-// Build a condensed block index for the LLM context
+// ============================================
+// Hybrid Search: Vector + LLM
+// ============================================
+
+/**
+ * Use vector search to find semantically relevant blocks for a query.
+ * Falls back to database search if Vectorize is not available.
+ */
+async function findRelevantBlocks(
+  env: Env,
+  userQuery: string,
+  options?: { tier?: string; minQuality?: number; topK?: number }
+): Promise<Block[]> {
+  const topK = options?.topK || 20;
+
+  // Try vector search first
+  if (env.AI && env.VECTOR_INDEX) {
+    try {
+      const vectorResults = await searchBlocks(env, userQuery, {
+        topK,
+        tier: options?.tier,
+        minQuality: options?.minQuality,
+      });
+
+      // Fetch full block data for results
+      const blocks = await Promise.all(
+        vectorResults.map((r) => getBlockById(env.DB, r.id))
+      );
+
+      const validBlocks = blocks.filter(Boolean) as Block[];
+      if (validBlocks.length > 0) {
+        return validBlocks;
+      }
+      // Fall through to database search if no results
+    } catch (error) {
+      console.error('Vector search failed, falling back to database:', error);
+    }
+  }
+
+  // Fallback: use database with quality filters
+  return getBlocks(env.DB, {
+    tier: options?.tier as QualityTier,
+    minQuality: options?.minQuality,
+    limit: topK,
+  });
+}
+
+/**
+ * Build block context from vector search results for LLM.
+ * More focused than the old approach - only includes relevant blocks.
+ */
+async function buildBlockContextHybrid(
+  env: Env,
+  userQuery: string
+): Promise<{ context: string; relevantBlocks: Block[] }> {
+  // Get semantically relevant blocks
+  const relevantBlocks = await findRelevantBlocks(env, userQuery, { topK: 20 });
+  const stats = await getBlockStats(env.DB);
+
+  // Format blocks for LLM context
+  const blockList = relevantBlocks.map((block) => ({
+    id: block.id,
+    name: block.block_name,
+    variant: block.block_variant,
+    tier: block.quality_tier || 'unrated',
+    score: block.quality_score || 0,
+    desc: (block as Block & { description?: string }).description ||
+      `A ${block.block_name} block`,
+    hasJs: block.has_javascript,
+    interactive: block.has_interactivity,
+  }));
+
+  const context = JSON.stringify({
+    searchQuery: userQuery,
+    totalInDatabase: stats.total,
+    relevantBlocks: blockList,
+    tierCounts: stats.by_tier,
+  });
+
+  return { context, relevantBlocks };
+}
+
+// Legacy fallback: Build a condensed block index for the LLM context
 async function buildBlockContext(db: D1Database): Promise<string> {
   const blocks = await getBlocks(db, { limit: 500 });
   const stats = await getBlockStats(db);
@@ -36,7 +119,7 @@ async function buildBlockContext(db: D1Database): Promise<string> {
         id: block.id,
         tier: block.quality_tier || 'unrated',
         score: block.quality_score || 0,
-        desc: (block.description || `A ${block.block_name} block`).substring(0, 100),
+        desc: ((block as Block & { description?: string }).description || `A ${block.block_name} block`).substring(0, 100),
       });
     }
   }
@@ -50,27 +133,31 @@ async function buildBlockContext(db: D1Database): Promise<string> {
 }
 
 // Build the system prompt with block context
-function buildSystemPrompt(blockContext: string): string {
+function buildSystemPrompt(blockContext: string, isHybridSearch: boolean = false): string {
+  const contextDescription = isHybridSearch
+    ? `I've already searched the database using semantic similarity to find blocks relevant to the user's query. Here are the most relevant matches:`
+    : `You have access to a database of blocks extracted from real EDS websites. Here is the current inventory:`;
+
   return `You are an EDS Block Collection assistant helping users find the right blocks for their AEM Edge Delivery Services web projects.
 
-You have access to a database of blocks extracted from real EDS websites. Here is the current inventory:
+${contextDescription}
 
 ${blockContext}
 
 QUALITY TIERS:
-- Gold (85+): Production-ready, excellent accessibility and performance - best for production use
-- Silver (70-84): Good quality, may need minor adjustments
-- Bronze (50-69): Usable but may need significant improvements
-- Unrated: Not yet scored
+- Gold (98-100): Reference quality - Block Collection level, best for production
+- Silver (93-97): Excellent implementations
+- Bronze (85-92): Good implementations
+- Unrated (<85): Below threshold - needs improvement
 
 YOUR BEHAVIOR:
-1. When a user describes what they need, suggest 2-4 matching blocks from the database
-2. If the request is ambiguous, ask ONE clarifying question about:
+1. Review the relevant blocks and suggest 2-4 that best match the user's needs
+2. Prioritize blocks with higher quality scores and gold/silver tiers
+3. If the request is ambiguous, ask ONE clarifying question about:
    - Visual style preferences (minimal, bold, corporate, playful)
    - Quality tier preference (recommend gold for production)
    - Specific features needed (images, CTAs, animations, icons)
-3. For each suggestion, briefly explain why it matches their needs
-4. Focus on the block_name and quality metrics
+4. For each suggestion, briefly explain why it matches their needs
 
 RESPONSE FORMAT:
 You MUST respond with valid JSON in this exact format:
@@ -89,10 +176,10 @@ QUICK REPLIES:
 - Examples: ["Show alternatives", "Use this one"], ["Gold tier only", "Any quality"], ["Yes, with images", "Text only"]
 
 IMPORTANT:
-- Only suggest blocks that exist in the provided inventory
-- Use the exact block IDs from the inventory
+- Only suggest blocks from the provided list - they've been pre-filtered for relevance
+- Use the exact block IDs from the list
 - Keep responses concise and helpful
-- If no blocks match, say so honestly and suggest alternatives`;
+- If no blocks seem like a good match, say so honestly`;
 }
 
 // Parse the LLM response to extract structured data
@@ -186,9 +273,25 @@ export async function handleChatRequest(
     const body = await request.json() as ChatRequest;
     const sessionId = body.sessionId || crypto.randomUUID();
 
-    // Build block context
-    const blockContext = await buildBlockContext(env.DB);
-    const systemPrompt = buildSystemPrompt(blockContext);
+    // Extract the latest user message for semantic search
+    const latestUserMessage = body.messages
+      .filter((m) => m.role === 'user')
+      .pop()?.content || '';
+
+    // Use hybrid search if Vectorize is available
+    const useHybridSearch = !!(env.AI && env.VECTOR_INDEX);
+    let blockContext: string;
+    let relevantBlocks: Block[] = [];
+
+    if (useHybridSearch && latestUserMessage) {
+      const hybrid = await buildBlockContextHybrid(env, latestUserMessage);
+      blockContext = hybrid.context;
+      relevantBlocks = hybrid.relevantBlocks;
+    } else {
+      blockContext = await buildBlockContext(env.DB);
+    }
+
+    const systemPrompt = buildSystemPrompt(blockContext, useHybridSearch);
 
     // Prepare messages for Claude
     const messages = body.messages.map(m => ({

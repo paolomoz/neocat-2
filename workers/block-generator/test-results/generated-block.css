@@ -1,0 +1,100 @@
+.carousel-7-slides {
+  position: relative;
+  overflow: hidden;
+}
+
+.carousel-7-slides-wrapper {
+  overflow: hidden;
+}
+
+.carousel-7-slides-track {
+  display: flex;
+  transition: transform 0.5s ease-in-out;
+}
+
+.carousel-7-slides-slide {
+  flex: 0 0 100%;
+  display: flex;
+  flex-direction: column;
+}
+
+@media (min-width: 900px) {
+  .carousel-7-slides-slide {
+    flex-direction: row;
+  }
+}
+
+.carousel-7-slides-image {
+  flex: 1;
+}
+
+.carousel-7-slides-image img {
+  width: 100%;
+  height: auto;
+  object-fit: cover;
+}
+
+.carousel-7-slides-content {
+  flex: 1;
+  padding: 2rem;
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+}
+
+.carousel-7-slides-content h2 {
+  margin: 0 0 1rem;
+}
+
+.carousel-7-slides-content p {
+  margin: 0 0 1rem;
+}
+
+.carousel-7-slides-nav {
+  position: absolute;
+  top: 50%;
+  transform: translateY(-50%);
+  background: rgba(255, 255, 255, 0.9);
+  border: none;
+  width: 48px;
+  height: 48px;
+  border-radius: 50%;
+  cursor: pointer;
+  font-size: 1.5rem;
+  z-index: 10;
+  transition: background 0.2s;
+}
+
+.carousel-7-slides-nav:hover {
+  background: #fff;
+}
+
+.carousel-7-slides-nav--prev {
+  left: 1rem;
+}
+
+.carousel-7-slides-nav--next {
+  right: 1rem;
+}
+
+.carousel-7-slides-dots {
+  display: flex;
+  justify-content: center;
+  gap: 0.5rem;
+  padding: 1rem;
+}
+
+.carousel-7-slides-dot {
+  width: 12px;
+  height: 12px;
+  border-radius: 50%;
+  border: none;
+  background: #ccc;
+  cursor: pointer;
+  transition: background 0.2s;
+}
+
+.carousel-7-slides-dot.active,
+.carousel-7-slides-dot:hover {
+  background: #333;
+}

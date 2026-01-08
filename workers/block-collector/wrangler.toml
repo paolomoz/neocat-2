@@ -22,6 +22,15 @@ database_id = "8c2c1f69-5514-4346-9c15-fd3f56d35390"
 binding = "BUCKET"
 bucket_name = "block-assets"
 
+# Workers AI for embeddings
+[ai]
+binding = "AI"
+
+# Vectorize for semantic search
+[[vectorize]]
+binding = "VECTOR_INDEX"
+index_name = "block-embeddings"
+
 # Cron triggers for discovery and crawling
 [triggers]
 crons = ["0 * * * *", "0 2 * * SUN"]  # Every hour + Weekly discovery on Sunday 2AM UTC

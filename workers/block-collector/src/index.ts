@@ -1,4 +1,4 @@
-import { Env, APIResponse } from './types';
+import { Env, APIResponse, Block } from './types';
 import {
   getDiscoveryStats,
   getCrawlStats,
@@ -6,6 +6,7 @@ import {
   getSites,
   getSiteById,
   getBlocks,
+  getBlockById,
   getRepositories,
   getQueueStats,
   createSite,
@@ -32,6 +33,12 @@ import {
   generateQualityReport,
 } from './quality-scorer';
 import { handleChatRequest } from './chat';
+import {
+  upsertBlockEmbedding,
+  upsertBlockEmbeddingsBatch,
+  searchBlocks,
+  generateBlockDescription,
+} from './embeddings';
 
 // ============================================
 // CORS and Response Helpers
@@ -432,6 +439,105 @@ async function handleScoreBlocks(request: Request, env: Env): Promise<Response> 
 async function handleQualityReport(siteId: string, env: Env): Promise<Response> {
   const report = await generateQualityReport(env.DB, siteId);
   return jsonResponse({ success: true, data: report }, 200, env);
+}
+
+// ============================================
+// Embedding/Vector Search Endpoints
+// ============================================
+
+// Backfill embeddings for existing blocks
+async function handleEmbeddingsBackfill(request: Request, env: Env): Promise<Response> {
+  if (!env.AI || !env.VECTOR_INDEX) {
+    return errorResponse('Vectorize not configured (AI or VECTOR_INDEX binding missing)', 500, env);
+  }
+
+  const body = await request.json().catch(() => ({})) as {
+    siteId?: string;
+    limit?: number;
+  };
+
+  const limit = body.limit || 100;
+  const blocks = await getBlocks(env.DB, {
+    siteId: body.siteId,
+    limit,
+  });
+
+  // Prepare embedding inputs
+  const inputs = blocks
+    .filter((b) => b.html)
+    .map((block) => ({
+      blockId: block.id,
+      blockName: block.block_name,
+      html: block.cleaned_html || block.html || '',
+      description: generateBlockDescription(block),
+      qualityTier: block.quality_tier || 'unrated',
+      qualityScore: block.quality_score || 0,
+      siteId: block.site_id,
+    }));
+
+  // Process in batch
+  const result = await upsertBlockEmbeddingsBatch(env, inputs);
+
+  return jsonResponse({
+    success: true,
+    data: {
+      blocksProcessed: inputs.length,
+      embeddingsCreated: result.success,
+      embeddingsFailed: result.failed,
+      siteId: body.siteId || 'all',
+    },
+  }, 200, env);
+}
+
+// Semantic search for blocks
+async function handleBlocksSearch(request: Request, env: Env): Promise<Response> {
+  if (!env.AI || !env.VECTOR_INDEX) {
+    return errorResponse('Vectorize not configured', 500, env);
+  }
+
+  const url = new URL(request.url);
+  const query = url.searchParams.get('q');
+  const tier = url.searchParams.get('tier');
+  const minQuality = url.searchParams.get('minQuality');
+  const limit = parseInt(url.searchParams.get('limit') || '10');
+
+  if (!query) {
+    return errorResponse('Query parameter q is required', 400, env);
+  }
+
+  try {
+    const results = await searchBlocks(env, query, {
+      topK: limit,
+      tier: tier || undefined,
+      minQuality: minQuality ? parseInt(minQuality) : undefined,
+    });
+
+    // Fetch full block data for results
+    const blocksWithScores = await Promise.all(
+      results.map(async (r) => {
+        const block = await getBlockById(env.DB, r.id);
+        if (!block) return null;
+        return {
+          ...block,
+          similarityScore: r.score,
+          description: generateBlockDescription(block),
+        };
+      })
+    );
+
+    const validBlocks = blocksWithScores.filter(Boolean);
+
+    return jsonResponse({
+      success: true,
+      data: validBlocks,
+      meta: {
+        total: validBlocks.length,
+      },
+    }, 200, env);
+  } catch (error) {
+    console.error('Search error:', error);
+    return errorResponse(`Search failed: ${error}`, 500, env);
+  }
 }
 
 // ============================================
@@ -947,6 +1053,16 @@ async function handleRequest(request: Request, env: Env): Promise<Response> {
       return handleListBlocks(request, env);
     }
 
+    // Semantic block search (vector)
+    if (path === '/blocks/search' && method === 'GET') {
+      return handleBlocksSearch(request, env);
+    }
+
+    // Embeddings
+    if (path === '/embeddings/backfill' && method === 'POST') {
+      return handleEmbeddingsBackfill(request, env);
+    }
+
     // Chat
     if (path === '/api/chat' && method === 'POST') {
       return handleChatRequest(request, env);
@@ -969,6 +1085,13 @@ async function handleRequest(request: Request, env: Env): Promise<Response> {
     // Preview page with block highlighting
     if (path === '/preview' && method === 'GET') {
       return handlePreview(request, env);
+    }
+
+    // API documentation and trial page
+    if (path === '/api' && method === 'GET') {
+      return new Response(getApiDocsPage(), {
+        headers: { 'Content-Type': 'text/html', ...corsHeaders(env) },
+      });
     }
 
     // Home page / documentation
@@ -1427,6 +1550,386 @@ function getHomePage(): string {
     }
 
     init();
+  </script>
+</body>
+</html>`;
+}
+
+// ============================================
+// API Documentation Page
+// ============================================
+
+function getApiDocsPage(): string {
+  return `<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>EDS Block Collection API</title>
+  <style>
+    :root {
+      --bg: #0f172a;
+      --bg-card: #1e293b;
+      --bg-code: #0d1117;
+      --text: #f1f5f9;
+      --text-muted: #94a3b8;
+      --border: #334155;
+      --accent: #3b82f6;
+      --green: #22c55e;
+      --gold: #f59e0b;
+    }
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; background: var(--bg); color: var(--text); line-height: 1.6; }
+    .container { max-width: 1100px; margin: 0 auto; padding: 40px 20px; }
+    header { margin-bottom: 40px; }
+    header h1 { font-size: 2rem; margin-bottom: 10px; display: flex; align-items: center; gap: 12px; }
+    header p { color: var(--text-muted); font-size: 1.1rem; }
+    .badge { background: var(--accent); color: white; padding: 4px 10px; border-radius: 12px; font-size: 0.75rem; font-weight: 600; }
+    .badge.experimental { background: var(--gold); color: #000; }
+    .section { margin-bottom: 50px; }
+    .section h2 { font-size: 1.4rem; margin-bottom: 20px; padding-bottom: 10px; border-bottom: 1px solid var(--border); }
+    .section h3 { font-size: 1.1rem; margin: 25px 0 15px; color: var(--text-muted); }
+    .endpoint { background: var(--bg-card); border-radius: 12px; padding: 20px; margin-bottom: 20px; border: 1px solid var(--border); }
+    .endpoint-header { display: flex; align-items: center; gap: 12px; margin-bottom: 12px; flex-wrap: wrap; }
+    .method { padding: 4px 10px; border-radius: 6px; font-size: 0.8rem; font-weight: 700; font-family: monospace; }
+    .method.get { background: #22c55e33; color: #22c55e; }
+    .method.post { background: #3b82f633; color: #3b82f6; }
+    .endpoint-path { font-family: 'Monaco', 'Menlo', monospace; font-size: 0.95rem; color: var(--accent); }
+    .endpoint-desc { color: var(--text-muted); font-size: 0.9rem; margin-bottom: 15px; }
+    .params { margin-top: 15px; }
+    .params-title { font-size: 0.8rem; color: var(--text-muted); text-transform: uppercase; letter-spacing: 0.05em; margin-bottom: 8px; }
+    .param { display: grid; grid-template-columns: 120px 80px 1fr; gap: 10px; padding: 8px 0; border-bottom: 1px solid var(--border); font-size: 0.9rem; }
+    .param:last-child { border-bottom: none; }
+    .param-name { font-family: monospace; color: var(--gold); }
+    .param-type { color: var(--text-muted); font-size: 0.8rem; }
+    .param-desc { color: var(--text-muted); }
+    .param-required { color: #ef4444; font-size: 0.7rem; }
+    code { background: var(--bg-code); padding: 2px 6px; border-radius: 4px; font-family: 'Monaco', 'Menlo', monospace; font-size: 0.85rem; }
+    pre { background: var(--bg-code); padding: 16px; border-radius: 8px; overflow-x: auto; font-size: 0.85rem; line-height: 1.5; }
+    pre code { background: none; padding: 0; }
+    .try-it { background: var(--bg-card); border-radius: 12px; padding: 25px; border: 1px solid var(--border); }
+    .try-it h2 { margin-bottom: 20px; display: flex; align-items: center; gap: 10px; }
+    .input-group { margin-bottom: 20px; }
+    .input-group label { display: block; margin-bottom: 8px; font-size: 0.9rem; color: var(--text-muted); }
+    .input-row { display: flex; gap: 10px; }
+    input[type="text"], select { flex: 1; padding: 12px 16px; background: var(--bg); border: 1px solid var(--border); border-radius: 8px; color: var(--text); font-size: 1rem; }
+    input[type="text"]:focus, select:focus { outline: none; border-color: var(--accent); }
+    input[type="text"]::placeholder { color: var(--text-muted); }
+    select { cursor: pointer; }
+    button { padding: 12px 24px; background: var(--accent); border: none; border-radius: 8px; color: white; font-size: 1rem; font-weight: 600; cursor: pointer; transition: background 0.2s; }
+    button:hover { background: #2563eb; }
+    button:disabled { background: var(--border); cursor: not-allowed; }
+    .results { margin-top: 25px; }
+    .results-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 10px; }
+    .results-header h3 { font-size: 0.9rem; color: var(--text-muted); }
+    .results-meta { font-size: 0.8rem; color: var(--text-muted); }
+    .results-content { background: var(--bg-code); border-radius: 8px; padding: 16px; max-height: 500px; overflow: auto; }
+    .result-card { background: var(--bg-card); border: 1px solid var(--border); border-radius: 8px; padding: 16px; margin-bottom: 12px; }
+    .result-card:last-child { margin-bottom: 0; }
+    .result-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 10px; }
+    .result-name { font-weight: 600; font-size: 1.1rem; }
+    .result-scores { display: flex; gap: 8px; }
+    .score-badge { padding: 4px 10px; border-radius: 12px; font-size: 0.75rem; font-weight: 600; }
+    .score-badge.gold { background: var(--gold); color: #000; }
+    .score-badge.silver { background: #6b7280; color: #fff; }
+    .score-badge.bronze { background: #b45309; color: #fff; }
+    .score-badge.similarity { background: var(--accent); color: #fff; }
+    .result-html { background: var(--bg); padding: 12px; border-radius: 6px; font-family: monospace; font-size: 0.8rem; max-height: 150px; overflow: auto; white-space: pre-wrap; word-break: break-all; color: var(--text-muted); margin-top: 10px; }
+    .loading { text-align: center; padding: 40px; color: var(--text-muted); }
+    .spinner { width: 30px; height: 30px; border: 3px solid var(--border); border-top-color: var(--accent); border-radius: 50%; animation: spin 1s linear infinite; margin: 0 auto 15px; }
+    @keyframes spin { to { transform: rotate(360deg); } }
+    .back-link { display: inline-flex; align-items: center; gap: 6px; color: var(--accent); text-decoration: none; margin-bottom: 20px; font-size: 0.9rem; }
+    .back-link:hover { text-decoration: underline; }
+    .response-schema { background: var(--bg-code); border-radius: 8px; padding: 16px; margin-top: 15px; }
+    .copy-btn { background: var(--border); padding: 6px 12px; border-radius: 6px; font-size: 0.8rem; cursor: pointer; border: none; color: var(--text); }
+    .copy-btn:hover { background: var(--accent); }
+    @media (max-width: 600px) {
+      .param { grid-template-columns: 1fr; gap: 4px; }
+      .input-row { flex-direction: column; }
+    }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <a href="/" class="back-link">&larr; Back to Dashboard</a>
+
+    <header>
+      <h1>EDS Block Collection API <span class="badge experimental">Experimental</span></h1>
+      <p>REST API for searching and retrieving AEM Edge Delivery Services block examples</p>
+    </header>
+
+    <section class="try-it">
+      <h2>&#x1F9EA; Try It</h2>
+      <div class="input-group">
+        <label>Search Query</label>
+        <input type="text" id="searchQuery" placeholder="e.g., hero with image and call to action" value="hero with image">
+      </div>
+      <div class="input-group">
+        <label>Filters</label>
+        <div class="input-row">
+          <select id="tierFilter">
+            <option value="">Any Quality Tier</option>
+            <option value="gold" selected>Gold Only</option>
+            <option value="silver">Silver Only</option>
+            <option value="bronze">Bronze Only</option>
+          </select>
+          <select id="limitFilter">
+            <option value="3">3 results</option>
+            <option value="5" selected>5 results</option>
+            <option value="10">10 results</option>
+          </select>
+        </div>
+      </div>
+      <button onclick="runSearch()" id="searchBtn">Search Blocks</button>
+
+      <div class="results" id="results" style="display: none;">
+        <div class="results-header">
+          <h3>Results</h3>
+          <span class="results-meta" id="resultsMeta"></span>
+        </div>
+        <div class="results-content" id="resultsContent"></div>
+      </div>
+    </section>
+
+    <section class="section">
+      <h2>Endpoints</h2>
+
+      <div class="endpoint">
+        <div class="endpoint-header">
+          <span class="method get">GET</span>
+          <span class="endpoint-path">/blocks/search</span>
+        </div>
+        <p class="endpoint-desc">Semantic search for blocks using natural language descriptions. Powered by Vectorize embeddings.</p>
+        <div class="params">
+          <div class="params-title">Query Parameters</div>
+          <div class="param">
+            <span class="param-name">q <span class="param-required">*</span></span>
+            <span class="param-type">string</span>
+            <span class="param-desc">Search query describing the block you need</span>
+          </div>
+          <div class="param">
+            <span class="param-name">tier</span>
+            <span class="param-type">string</span>
+            <span class="param-desc">Filter by quality tier: <code>gold</code>, <code>silver</code>, <code>bronze</code></span>
+          </div>
+          <div class="param">
+            <span class="param-name">limit</span>
+            <span class="param-type">number</span>
+            <span class="param-desc">Max results to return (default: 10)</span>
+          </div>
+        </div>
+        <h3>Example Request</h3>
+        <pre><code>GET /blocks/search?q=hero+with+image&tier=gold&limit=5</code></pre>
+        <h3>Response</h3>
+        <pre><code>{
+  "success": true,
+  "data": [
+    {
+      "id": "uuid",
+      "block_name": "hero",
+      "quality_tier": "gold",
+      "quality_score": 100,
+      "similarityScore": 0.72,
+      "html": "&lt;div class=\\"hero\\"&gt;...&lt;/div&gt;",
+      "cleaned_html": "...",
+      "quality_breakdown": {
+        "performance": 100,
+        "accessibility": 100,
+        "semanticHtml": 100,
+        "codeQuality": 100,
+        "responsive": 100,
+        "edsCompliance": 100
+      },
+      "content_model": { ... }
+    }
+  ],
+  "meta": { "total": 5 }
+}</code></pre>
+      </div>
+
+      <div class="endpoint">
+        <div class="endpoint-header">
+          <span class="method get">GET</span>
+          <span class="endpoint-path">/blocks</span>
+        </div>
+        <p class="endpoint-desc">List blocks with filtering. Use for browsing by block type or quality tier.</p>
+        <div class="params">
+          <div class="params-title">Query Parameters</div>
+          <div class="param">
+            <span class="param-name">blockName</span>
+            <span class="param-type">string</span>
+            <span class="param-desc">Filter by exact block name (e.g., <code>hero</code>, <code>carousel</code>)</span>
+          </div>
+          <div class="param">
+            <span class="param-name">tier</span>
+            <span class="param-type">string</span>
+            <span class="param-desc">Filter by quality tier</span>
+          </div>
+          <div class="param">
+            <span class="param-name">minQuality</span>
+            <span class="param-type">number</span>
+            <span class="param-desc">Minimum quality score (0-100)</span>
+          </div>
+          <div class="param">
+            <span class="param-name">limit</span>
+            <span class="param-type">number</span>
+            <span class="param-desc">Max results (default: 100)</span>
+          </div>
+          <div class="param">
+            <span class="param-name">offset</span>
+            <span class="param-type">number</span>
+            <span class="param-desc">Pagination offset</span>
+          </div>
+        </div>
+        <h3>Example</h3>
+        <pre><code>GET /blocks?blockName=hero&tier=gold&limit=10</code></pre>
+      </div>
+
+      <div class="endpoint">
+        <div class="endpoint-header">
+          <span class="method get">GET</span>
+          <span class="endpoint-path">/stats</span>
+        </div>
+        <p class="endpoint-desc">Get collection statistics including total blocks, quality distribution, and block types.</p>
+        <h3>Example Response</h3>
+        <pre><code>{
+  "success": true,
+  "data": {
+    "blocks": {
+      "total": 1250,
+      "by_tier": { "gold": 180, "silver": 340, "bronze": 420, "unrated": 310 },
+      "by_name": { "hero": 45, "carousel": 32, "cards": 28, ... },
+      "average_quality": 78
+    },
+    "crawl": { "sites_total": 85, "pages_crawled": 420 }
+  }
+}</code></pre>
+      </div>
+
+      <div class="endpoint">
+        <div class="endpoint-header">
+          <span class="method post">POST</span>
+          <span class="endpoint-path">/api/chat</span>
+        </div>
+        <p class="endpoint-desc">Conversational interface for finding blocks. Uses hybrid vector search + LLM reasoning.</p>
+        <h3>Request Body</h3>
+        <pre><code>{
+  "messages": [
+    { "role": "user", "content": "I need a hero block with testimonials" }
+  ],
+  "sessionId": "optional-session-id"
+}</code></pre>
+      </div>
+    </section>
+
+    <section class="section">
+      <h2>Quality Tiers</h2>
+      <p style="color: var(--text-muted); margin-bottom: 15px;">Blocks are scored on performance, accessibility, semantic HTML, code quality, responsiveness, and EDS compliance.</p>
+      <div class="endpoint" style="display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 15px;">
+        <div>
+          <span class="score-badge gold" style="font-size: 0.9rem; padding: 6px 14px;">Gold (98-100)</span>
+          <p style="color: var(--text-muted); font-size: 0.85rem; margin-top: 8px;">Reference quality implementations</p>
+        </div>
+        <div>
+          <span class="score-badge silver" style="font-size: 0.9rem; padding: 6px 14px;">Silver (93-97)</span>
+          <p style="color: var(--text-muted); font-size: 0.85rem; margin-top: 8px;">Excellent implementations</p>
+        </div>
+        <div>
+          <span class="score-badge bronze" style="font-size: 0.9rem; padding: 6px 14px;">Bronze (85-92)</span>
+          <p style="color: var(--text-muted); font-size: 0.85rem; margin-top: 8px;">Good implementations</p>
+        </div>
+      </div>
+    </section>
+
+    <section class="section">
+      <h2>Usage Example</h2>
+      <p style="color: var(--text-muted); margin-bottom: 15px;">Use the API to find reference blocks for code generation:</p>
+      <pre><code>// Find a high-quality hero block example
+const response = await fetch(
+  'https://eds-block-collector.paolo-moz.workers.dev/blocks/search?' +
+  'q=hero+with+background+image+and+cta&tier=gold&limit=1'
+);
+
+const { data } = await response.json();
+const reference = data[0];
+
+// Use as context for LLM code generation
+console.log(reference.cleaned_html);      // Clean HTML structure
+console.log(reference.content_model);      // Content model schema
+console.log(reference.quality_breakdown);  // Quality scores</code></pre>
+    </section>
+  </div>
+
+  <script>
+    const API_BASE = location.origin;
+
+    async function runSearch() {
+      const query = document.getElementById('searchQuery').value.trim();
+      const tier = document.getElementById('tierFilter').value;
+      const limit = document.getElementById('limitFilter').value;
+      const btn = document.getElementById('searchBtn');
+      const results = document.getElementById('results');
+      const content = document.getElementById('resultsContent');
+      const meta = document.getElementById('resultsMeta');
+
+      if (!query) {
+        alert('Please enter a search query');
+        return;
+      }
+
+      btn.disabled = true;
+      btn.textContent = 'Searching...';
+      results.style.display = 'block';
+      content.innerHTML = '<div class="loading"><div class="spinner"></div>Searching blocks...</div>';
+
+      try {
+        const params = new URLSearchParams({ q: query, limit });
+        if (tier) params.set('tier', tier);
+
+        const url = API_BASE + '/blocks/search?' + params.toString();
+        const start = Date.now();
+        const response = await fetch(url);
+        const data = await response.json();
+        const elapsed = Date.now() - start;
+
+        meta.textContent = data.data?.length + ' results in ' + elapsed + 'ms';
+
+        if (data.success && data.data?.length > 0) {
+          content.innerHTML = data.data.map(block => \`
+            <div class="result-card">
+              <div class="result-header">
+                <span class="result-name">\${escapeHtml(block.block_name)}</span>
+                <div class="result-scores">
+                  <span class="score-badge \${block.quality_tier}">\${block.quality_tier} \${block.quality_score}</span>
+                  \${block.similarityScore ? '<span class="score-badge similarity">' + (block.similarityScore * 100).toFixed(1) + '% match</span>' : ''}
+                </div>
+              </div>
+              <div style="color: var(--text-muted); font-size: 0.85rem;">\${escapeHtml(block.description || '')}</div>
+              <div class="result-html">\${escapeHtml(block.cleaned_html || block.html || 'No HTML').substring(0, 800)}</div>
+            </div>
+          \`).join('');
+        } else if (data.success) {
+          content.innerHTML = '<div class="loading">No blocks found matching your query</div>';
+        } else {
+          content.innerHTML = '<div class="loading" style="color: #ef4444;">Error: ' + escapeHtml(data.error || 'Unknown error') + '</div>';
+        }
+      } catch (e) {
+        content.innerHTML = '<div class="loading" style="color: #ef4444;">Request failed: ' + escapeHtml(e.message) + '</div>';
+      }
+
+      btn.disabled = false;
+      btn.textContent = 'Search Blocks';
+    }
+
+    function escapeHtml(str) {
+      if (!str) return '';
+      return str.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+    }
+
+    // Allow Enter to search
+    document.getElementById('searchQuery').addEventListener('keydown', (e) => {
+      if (e.key === 'Enter') runSearch();
+    });
   </script>
 </body>
 </html>`;

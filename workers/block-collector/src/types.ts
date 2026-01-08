@@ -6,6 +6,8 @@ export interface Env {
   DB: D1Database;
   BUCKET: R2Bucket;
   BROWSER: Fetcher;
+  AI: Ai;
+  VECTOR_INDEX: VectorizeIndex;
   GITHUB_TOKEN?: string;
   WAPPALYZER_API_KEY?: string;
   LIGHTHOUSE_API_KEY?: string;

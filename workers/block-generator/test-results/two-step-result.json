@@ -1,0 +1,336 @@
+{
+  "success": true,
+  "blockName": "carousel-7-slides",
+  "layoutPattern": "carousel",
+  "html": "<div class=\"carousel-7-slides\">\n  <div>\n    <div><picture><img src=\"https://www.still.de/fileadmin/_processed_/4/4/csm_STILL_Fleet_Solutions_Fleet_Management_2120x1080_3002c3cf54.jpg\" alt=\"\"></picture></div>\n    <div><h2>Smart move. Together we improve.</h2>\n<p>Optimieren Sie Ihre Flotte mit STILL Fleet Solutions.</p></div>\n    <div><p class=\"button-container\"><a href=\"https://www.still.de/loesungskompetenz/intralogistik-fleetsolutions.html\" class=\"button\">Jetzt Flotte optimieren!</a></p></div>\n  </div>\n  <div>\n    <div><picture><img src=\"https://www.still.de/fileadmin/_processed_/8/5/csm_FXR-14C-16C_2120x1080_Banner_6a5c49911d.jpg\" alt=\"\"></picture></div>\n    <div><h2>FXR 14C–16C – Großes schaffen. Smart arbeiten.</h2>\n<p>STILL Schubmaststapler</p></div>\n    <div><p class=\"button-container\"><a href=\"https://www.still.de/fahrzeuge/gabelstapler-und-lagertechnik/schubmaststapler/fxr-14c-16c.html\" class=\"button\">Mehr erfahren</a></p></div>\n  </div>\n  <div>\n    <div><picture><img src=\"https://www.still.de/fileadmin/_processed_/e/1/csm_STILL_RX20xLi-Ion_Battery_2120x1080_4452e156fd.jpg\" alt=\"\"></picture></div>\n    <div><h2>It's a match!</h2>\n<p>Unser beliebtester Stapler hat seinen neuen, perfekten Power-Partner gefunden.</p></div>\n    <div><p class=\"button-container\"><a href=\"https://www.still.de/itsamatch.html\" class=\"button\">Jetzt Angebot anfordern!</a></p></div>\n  </div>\n  <div>\n    <div><picture><img src=\"https://www.still.de/fileadmin/_processed_/6/e/csm_STILL_Keyvisual_Investorenbooster_X-Line_small_76a6e59e5a.jpg\" alt=\"\"></picture></div>\n    <div><h2>Investitionsbooster für Ihre Intralogistik</h2>\n<p>Jetzt Steuervorteile nutzen. Sofort sparen und nachhaltig investieren.</p></div>\n    <div><p class=\"button-container\"><a href=\"https://www.still.de/fahrzeuge/finanzierungsloesungen/investitionsbooster.html\" class=\"button\">Direkt anfragen</a></p></div>\n  </div>\n  <div>\n    <div><picture><img src=\"https://www.still.de/fileadmin/_processed_/d/8/csm_DE-Staatliche-Foerderung-erhalten_0365973c43.png\" alt=\"\"></picture></div>\n    <div><h2>Elektrostapler. Bis zu 33 % sparen.</h2>\n<p>Jetzt staatliche Förderung nutzen.</p></div>\n    <div><p class=\"button-container\"><a href=\"https://www.still.de/blog/unternehmen-profitieren-von-staatlichen-foerdermoeglichkeiten-fuer-saubere-elektrostapler.html\" class=\"button\">Mehr erfahren</a></p></div>\n  </div>\n  <div>\n    <div><picture><img src=\"https://www.still.de/fileadmin/_processed_/b/e/csm_STILL_E-Stapler_RX-Family_HB_3840x1400_28df1b8c56.jpg\" alt=\"\"></picture></div>\n    <div><h2>Lass Dich elektrisieren!</h2>\n<p>Die STILL RX-Familie.</p></div>\n    <div><p class=\"button-container\"><a href=\"https://www.still.de/fahrzeuge/gabelstapler-und-lagertechnik/elektro-stapler.html\" class=\"button\">Jetzt entdecken</a></p></div>\n  </div>\n  <div>\n    <div><picture><img src=\"https://www.still.de/fileadmin/_processed_/2/b/csm_STILL_Automation_Keyvisual_Ebenen_RGB16_4_2120x1080_8b7b10e985.jpg\" alt=\"\"></picture></div>\n    <div><h2>Automatisierung in der Logistik</h2>\n<p>Smart from the start.</p></div>\n    <div><p class=\"button-container\"><a href=\"https://www.still.de/intralogistik-systeme/automatisierung-intralogistik.html\" class=\"button\">Mehr erfahren</a></p></div>\n  </div>\n</div>",
+  "js": "export default function decorate(block) {\n  const rows = [...block.children];\n  if (rows.length === 0) return;\n\n  // Create carousel structure\n  const wrapper = document.createElement('div');\n  wrapper.className = 'carousel-7-slides-wrapper';\n\n  const track = document.createElement('div');\n  track.className = 'carousel-7-slides-track';\n\n  // Process each row as a slide\n  rows.forEach((row, index) => {\n    row.classList.add('carousel-7-slides-slide');\n    if (index === 0) row.classList.add('active');\n\n    const cells = [...row.children];\n    if (cells[0]) cells[0].classList.add('carousel-7-slides-image');\n    if (cells[1]) cells[1].classList.add('carousel-7-slides-content');\n\n    track.appendChild(row);\n  });\n\n  wrapper.appendChild(track);\n\n  // Navigation buttons\n  const prevBtn = document.createElement('button');\n  prevBtn.className = 'carousel-7-slides-nav carousel-7-slides-nav--prev';\n  prevBtn.setAttribute('aria-label', 'Previous slide');\n  prevBtn.innerHTML = '❮';\n\n  const nextBtn = document.createElement('button');\n  nextBtn.className = 'carousel-7-slides-nav carousel-7-slides-nav--next';\n  nextBtn.setAttribute('aria-label', 'Next slide');\n  nextBtn.innerHTML = '❯';\n\n  // Dots navigation\n  const dots = document.createElement('div');\n  dots.className = 'carousel-7-slides-dots';\n  rows.forEach((_, index) => {\n    const dot = document.createElement('button');\n    dot.className = 'carousel-7-slides-dot' + (index === 0 ? ' active' : '');\n    dot.setAttribute('aria-label', `Go to slide ${index + 1}`);\n    dot.dataset.slide = index.toString();\n    dots.appendChild(dot);\n  });\n\n  // Append all elements\n  block.innerHTML = '';\n  block.appendChild(wrapper);\n  block.appendChild(prevBtn);\n  block.appendChild(nextBtn);\n  block.appendChild(dots);\n\n  // State\n  let currentSlide = 0;\n  const totalSlides = rows.length;\n\n  function goToSlide(index) {\n    if (index < 0) index = totalSlides - 1;\n    if (index >= totalSlides) index = 0;\n    currentSlide = index;\n\n    track.style.transform = `translateX(-${currentSlide * 100}%)`;\n\n    // Update active states\n    track.querySelectorAll('.carousel-7-slides-slide').forEach((slide, i) => {\n      slide.classList.toggle('active', i === currentSlide);\n    });\n    dots.querySelectorAll('.carousel-7-slides-dot').forEach((dot, i) => {\n      dot.classList.toggle('active', i === currentSlide);\n    });\n  }\n\n  // Event listeners\n  prevBtn.addEventListener('click', () => goToSlide(currentSlide - 1));\n  nextBtn.addEventListener('click', () => goToSlide(currentSlide + 1));\n  dots.addEventListener('click', (e) => {\n    const dot = e.target.closest('.carousel-7-slides-dot');\n    if (dot) goToSlide(parseInt(dot.dataset.slide, 10));\n  });\n\n  // Auto-advance (optional)\n  // setInterval(() => goToSlide(currentSlide + 1), 5000);\n}\n",
+  "css": ".carousel-7-slides {\n  position: relative;\n  overflow: hidden;\n}\n\n.carousel-7-slides-wrapper {\n  overflow: hidden;\n}\n\n.carousel-7-slides-track {\n  display: flex;\n  transition: transform 0.5s ease-in-out;\n}\n\n.carousel-7-slides-slide {\n  flex: 0 0 100%;\n  display: flex;\n  flex-direction: column;\n}\n\n@media (min-width: 900px) {\n  .carousel-7-slides-slide {\n    flex-direction: row;\n  }\n}\n\n.carousel-7-slides-image {\n  flex: 1;\n}\n\n.carousel-7-slides-image img {\n  width: 100%;\n  height: auto;\n  object-fit: cover;\n}\n\n.carousel-7-slides-content {\n  flex: 1;\n  padding: 2rem;\n  display: flex;\n  flex-direction: column;\n  justify-content: center;\n}\n\n.carousel-7-slides-content h2 {\n  margin: 0 0 1rem;\n}\n\n.carousel-7-slides-content p {\n  margin: 0 0 1rem;\n}\n\n.carousel-7-slides-nav {\n  position: absolute;\n  top: 50%;\n  transform: translateY(-50%);\n  background: rgba(255, 255, 255, 0.9);\n  border: none;\n  width: 48px;\n  height: 48px;\n  border-radius: 50%;\n  cursor: pointer;\n  font-size: 1.5rem;\n  z-index: 10;\n  transition: background 0.2s;\n}\n\n.carousel-7-slides-nav:hover {\n  background: #fff;\n}\n\n.carousel-7-slides-nav--prev {\n  left: 1rem;\n}\n\n.carousel-7-slides-nav--next {\n  right: 1rem;\n}\n\n.carousel-7-slides-dots {\n  display: flex;\n  justify-content: center;\n  gap: 0.5rem;\n  padding: 1rem;\n}\n\n.carousel-7-slides-dot {\n  width: 12px;\n  height: 12px;\n  border-radius: 50%;\n  border: none;\n  background: #ccc;\n  cursor: pointer;\n  transition: background 0.2s;\n}\n\n.carousel-7-slides-dot.active,\n.carousel-7-slides-dot:hover {\n  background: #333;\n}\n",
+  "contentModel": {
+    "blockType": "carousel",
+    "blockName": "carousel-7-slides",
+    "description": {
+      "componentType": "cookie-consent-modal",
+      "layout": "centered modal overlay on top of hero section",
+      "layers": [
+        "hero-background-with-content",
+        "semi-transparent-page-overlay",
+        "modal-dialog-box"
+      ],
+      "colorScheme": "white modal background, dark gray text, orange primary action button, white secondary button with gray border",
+      "effects": [
+        "modal-drop-shadow",
+        "rounded-button-corners",
+        "orange-button-hover-state"
+      ]
+    },
+    "content": {
+      "items": [
+        {
+          "index": 0,
+          "cells": [
+            {
+              "name": "image",
+              "elements": [
+                {
+                  "type": "image",
+                  "src": "https://www.still.de/fileadmin/_processed_/4/4/csm_STILL_Fleet_Solutions_Fleet_Management_2120x1080_3002c3cf54.jpg",
+                  "alt": "",
+                  "imageRole": "photo"
+                }
+              ]
+            },
+            {
+              "name": "content",
+              "elements": [
+                {
+                  "type": "heading",
+                  "level": 2,
+                  "text": "Smart move. Together we improve."
+                },
+                {
+                  "type": "paragraph",
+                  "text": "Optimieren Sie Ihre Flotte mit STILL Fleet Solutions."
+                }
+              ]
+            },
+            {
+              "name": "cta",
+              "elements": [
+                {
+                  "type": "link",
+                  "text": "Jetzt Flotte optimieren!",
+                  "href": "https://www.still.de/loesungskompetenz/intralogistik-fleetsolutions.html"
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "index": 1,
+          "cells": [
+            {
+              "name": "image",
+              "elements": [
+                {
+                  "type": "image",
+                  "src": "https://www.still.de/fileadmin/_processed_/8/5/csm_FXR-14C-16C_2120x1080_Banner_6a5c49911d.jpg",
+                  "alt": "",
+                  "imageRole": "photo"
+                }
+              ]
+            },
+            {
+              "name": "content",
+              "elements": [
+                {
+                  "type": "heading",
+                  "level": 2,
+                  "text": "FXR 14C–16C – Großes schaffen. Smart arbeiten."
+                },
+                {
+                  "type": "paragraph",
+                  "text": "STILL Schubmaststapler"
+                }
+              ]
+            },
+            {
+              "name": "cta",
+              "elements": [
+                {
+                  "type": "link",
+                  "text": "Mehr erfahren",
+                  "href": "https://www.still.de/fahrzeuge/gabelstapler-und-lagertechnik/schubmaststapler/fxr-14c-16c.html"
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "index": 2,
+          "cells": [
+            {
+              "name": "image",
+              "elements": [
+                {
+                  "type": "image",
+                  "src": "https://www.still.de/fileadmin/_processed_/e/1/csm_STILL_RX20xLi-Ion_Battery_2120x1080_4452e156fd.jpg",
+                  "alt": "",
+                  "imageRole": "photo"
+                }
+              ]
+            },
+            {
+              "name": "content",
+              "elements": [
+                {
+                  "type": "heading",
+                  "level": 2,
+                  "text": "It's a match!"
+                },
+                {
+                  "type": "paragraph",
+                  "text": "Unser beliebtester Stapler hat seinen neuen, perfekten Power-Partner gefunden."
+                }
+              ]
+            },
+            {
+              "name": "cta",
+              "elements": [
+                {
+                  "type": "link",
+                  "text": "Jetzt Angebot anfordern!",
+                  "href": "https://www.still.de/itsamatch.html"
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "index": 3,
+          "cells": [
+            {
+              "name": "image",
+              "elements": [
+                {
+                  "type": "image",
+                  "src": "https://www.still.de/fileadmin/_processed_/6/e/csm_STILL_Keyvisual_Investorenbooster_X-Line_small_76a6e59e5a.jpg",
+                  "alt": "",
+                  "imageRole": "photo"
+                }
+              ]
+            },
+            {
+              "name": "content",
+              "elements": [
+                {
+                  "type": "heading",
+                  "level": 2,
+                  "text": "Investitionsbooster für Ihre Intralogistik"
+                },
+                {
+                  "type": "paragraph",
+                  "text": "Jetzt Steuervorteile nutzen. Sofort sparen und nachhaltig investieren."
+                }
+              ]
+            },
+            {
+              "name": "cta",
+              "elements": [
+                {
+                  "type": "link",
+                  "text": "Direkt anfragen",
+                  "href": "https://www.still.de/fahrzeuge/finanzierungsloesungen/investitionsbooster.html"
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "index": 4,
+          "cells": [
+            {
+              "name": "image",
+              "elements": [
+                {
+                  "type": "image",
+                  "src": "https://www.still.de/fileadmin/_processed_/d/8/csm_DE-Staatliche-Foerderung-erhalten_0365973c43.png",
+                  "alt": "",
+                  "imageRole": "photo"
+                }
+              ]
+            },
+            {
+              "name": "content",
+              "elements": [
+                {
+                  "type": "heading",
+                  "level": 2,
+                  "text": "Elektrostapler. Bis zu 33 % sparen."
+                },
+                {
+                  "type": "paragraph",
+                  "text": "Jetzt staatliche Förderung nutzen."
+                }
+              ]
+            },
+            {
+              "name": "cta",
+              "elements": [
+                {
+                  "type": "link",
+                  "text": "Mehr erfahren",
+                  "href": "https://www.still.de/blog/unternehmen-profitieren-von-staatlichen-foerdermoeglichkeiten-fuer-saubere-elektrostapler.html"
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "index": 5,
+          "cells": [
+            {
+              "name": "image",
+              "elements": [
+                {
+                  "type": "image",
+                  "src": "https://www.still.de/fileadmin/_processed_/b/e/csm_STILL_E-Stapler_RX-Family_HB_3840x1400_28df1b8c56.jpg",
+                  "alt": "",
+                  "imageRole": "photo"
+                }
+              ]
+            },
+            {
+              "name": "content",
+              "elements": [
+                {
+                  "type": "heading",
+                  "level": 2,
+                  "text": "Lass Dich elektrisieren!"
+                },
+                {
+                  "type": "paragraph",
+                  "text": "Die STILL RX-Familie."
+                }
+              ]
+            },
+            {
+              "name": "cta",
+              "elements": [
+                {
+                  "type": "link",
+                  "text": "Jetzt entdecken",
+                  "href": "https://www.still.de/fahrzeuge/gabelstapler-und-lagertechnik/elektro-stapler.html"
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "index": 6,
+          "cells": [
+            {
+              "name": "image",
+              "elements": [
+                {
+                  "type": "image",
+                  "src": "https://www.still.de/fileadmin/_processed_/2/b/csm_STILL_Automation_Keyvisual_Ebenen_RGB16_4_2120x1080_8b7b10e985.jpg",
+                  "alt": "",
+                  "imageRole": "photo"
+                }
+              ]
+            },
+            {
+              "name": "content",
+              "elements": [
+                {
+                  "type": "heading",
+                  "level": 2,
+                  "text": "Automatisierung in der Logistik"
+                },
+                {
+                  "type": "paragraph",
+                  "text": "Smart from the start."
+                }
+              ]
+            },
+            {
+              "name": "cta",
+              "elements": [
+                {
+                  "type": "link",
+                  "text": "Mehr erfahren",
+                  "href": "https://www.still.de/intralogistik-systeme/automatisierung-intralogistik.html"
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    },
+    "validation": {
+      "itemCount": 7,
+      "completeItems": 7,
+      "warnings": [],
+      "isComplete": true
+    },
+    "source": {
+      "url": "https://www.still.de/",
+      "extractedAt": "2026-01-08T12:28:19.236Z",
+      "selector": ".slick-slide:not(.slick-cloned)"
+    }
+  },
+  "validation": {
+    "isValid": true,
+    "errors": [],
+    "warnings": [],
+    "suggestions": []
+  },
+  "metadata": {
+    "elementCount": 7,
+    "hasImages": true,
+    "hasHeadings": true,
+    "hasLinks": true,
+    "rowCount": 7,
+    "columnCount": 3
+  }
+}
