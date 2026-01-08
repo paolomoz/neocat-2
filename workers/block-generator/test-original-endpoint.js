@@ -121,8 +121,13 @@ async function testOriginalEndpoint() {
         const slideMatches = iter.html?.match(/<div>/g) || [];
         console.log(`Approximate rows: ${Math.floor(slideMatches.length / 3)}`);
 
-        console.log('\n--- Generated HTML (first 1500 chars) ---');
-        console.log(iter.html?.substring(0, 1500) || 'No HTML');
+        // Count actual slides by looking for row pattern
+        const rowPattern = /<div>\s*<div>/g;
+        const rowMatches = iter.html?.match(rowPattern) || [];
+        console.log(`Actual slide count: ${rowMatches.length}`);
+
+        console.log('\n--- Generated HTML (first 3000 chars) ---');
+        console.log(iter.html?.substring(0, 3000) || 'No HTML');
       }
 
     } else {

@@ -496,6 +496,12 @@ export function extractContentGuided(
     }
   });
 
+  // Extract repeating items for content fidelity
+  content.items = extractRepeatingItems(elementHtml, baseUrl);
+  if (content.items.length > 0) {
+    console.log(`  Extracted ${content.items.length} repeating items for content manifest`);
+  }
+
   return content;
 }
 
@@ -505,6 +511,191 @@ interface ExtractedContent {
   images: Array<{ src: string; alt: string; role: string }>;
   ctas: Array<{ text: string; href: string; style: string }>;
   structure: ComponentDescription['structure'];
+  /** Repeating content items (slides, cards, etc.) - for content fidelity */
+  items?: ContentItem[];
+}
+
+/**
+ * A single repeating content item (slide, card, column, etc.)
+ */
+interface ContentItem {
+  index: number;
+  heading?: string;
+  subheading?: string;
+  paragraph?: string;
+  image?: { src: string; alt: string };
+  cta?: { text: string; href: string };
+}
+
+/**
+ * Extract repeating content items from HTML (slides, cards, etc.)
+ * This ensures all items are captured for content fidelity
+ */
+export function extractRepeatingItems(
+  elementHtml: string,
+  baseUrl: string
+): ContentItem[] {
+  const { document } = parseHTML(`<!DOCTYPE html><html><body>${elementHtml}</body></html>`);
+  const root = document.body.firstElementChild || document.body;
+  const items: ContentItem[] = [];
+
+  // Common selectors for repeating items (slides, cards, columns, etc.)
+  // Exclude cloned items from sliders
+  const itemSelectors = [
+    // Carousel/slider slides
+    '[class*="slide"]:not([class*="clone"]):not(.slick-cloned)',
+    '[class*="swiper-slide"]',
+    '[class*="carousel-item"]',
+    // Cards
+    '[class*="card"]:not([class*="cards"])',
+    '[class*="tile"]',
+    // Grid items
+    '[class*="grid-item"]',
+    '[class*="col-"]:not([class*="column"])',
+    // List items in specific containers
+    '.items > *',
+    '.list > *',
+  ];
+
+  let foundItems: any[] = [];
+
+  // Try each selector pattern
+  for (const selector of itemSelectors) {
+    try {
+      const elements = root.querySelectorAll(selector);
+      if (elements.length >= 2) {
+        // Filter out nested duplicates - only keep top-level items
+        const filtered = Array.from(elements).filter((el: any) => {
+          // Check if this element is a child of another matched element
+          let parent = el.parentElement;
+          while (parent && parent !== root) {
+            if (Array.from(elements).includes(parent)) {
+              return false; // This is nested, skip it
+            }
+            parent = parent.parentElement;
+          }
+          return true;
+        });
+
+        if (filtered.length >= 2 && filtered.length > foundItems.length) {
+          foundItems = filtered;
+        }
+      }
+    } catch (e) {
+      // Selector might be invalid, continue
+    }
+  }
+
+  // If no items found by selectors, try finding repeated sibling elements
+  if (foundItems.length < 2) {
+    // Look for direct children that share similar structure
+    const children = Array.from(root.children || []);
+    if (children.length >= 2) {
+      // Check if children have similar tag names (all divs, etc.)
+      const tagCounts: Record<string, any[]> = {};
+      children.forEach((child: any) => {
+        const tag = child.tagName;
+        if (!tagCounts[tag]) tagCounts[tag] = [];
+        tagCounts[tag].push(child);
+      });
+
+      // Find the most common repeated element type
+      for (const [tag, els] of Object.entries(tagCounts)) {
+        if (els.length >= 2 && els.length > foundItems.length) {
+          foundItems = els;
+        }
+      }
+    }
+  }
+
+  // Helper to resolve URLs
+  const resolveUrl = (src: string): string => {
+    if (!src) return '';
+    if (src.startsWith('http')) return src;
+    if (src.startsWith('data:')) return src;
+    if (src.startsWith('//')) return 'https:' + src;
+    try {
+      return new URL(src, baseUrl).href;
+    } catch {
+      return src;
+    }
+  };
+
+  // Helper to get best image src (handles lazy loading)
+  const getBestSrc = (img: any): string => {
+    const lazyAttrs = ['data-src', 'data-lazy-src', 'data-original', 'srcset', 'data-srcset'];
+    for (const attr of lazyAttrs) {
+      const val = img?.getAttribute?.(attr);
+      if (val && !val.includes('clear.gif') && !val.includes('spacer')) {
+        // For srcset, get first URL
+        const url = val.split(',')[0].trim().split(/\s+/)[0];
+        return resolveUrl(url);
+      }
+    }
+    const src = img?.getAttribute?.('src') || img?.src;
+    if (src && !src.includes('clear.gif') && !src.includes('spacer')) {
+      return resolveUrl(src);
+    }
+    return '';
+  };
+
+  // Extract content from each item
+  foundItems.forEach((item: any, index: number) => {
+    const contentItem: ContentItem = { index: index + 1 };
+
+    // Extract heading (h1-h6 or element with heading-like class)
+    const headingEl = item.querySelector('h1, h2, h3, h4, h5, h6, [class*="heading"], [class*="title"]');
+    if (headingEl) {
+      contentItem.heading = (headingEl.textContent || '').trim();
+    }
+
+    // Extract subheading or secondary text
+    const subEl = item.querySelector('[class*="subtitle"], [class*="subhead"], [class*="tagline"]');
+    if (subEl) {
+      contentItem.subheading = (subEl.textContent || '').trim();
+    }
+
+    // Extract paragraph
+    const paraEl = item.querySelector('p, [class*="description"], [class*="text"]:not([class*="button"])');
+    if (paraEl) {
+      const text = (paraEl.textContent || '').trim();
+      if (text && text.length > 5 && text !== contentItem.heading && text !== contentItem.subheading) {
+        contentItem.paragraph = text;
+      }
+    }
+
+    // Extract image
+    const imgEl = item.querySelector('img');
+    if (imgEl) {
+      const src = getBestSrc(imgEl);
+      if (src) {
+        contentItem.image = {
+          src,
+          alt: imgEl.getAttribute('alt') || '',
+        };
+      }
+    }
+
+    // Extract CTA/link
+    const linkEl = item.querySelector('a[href]:not([href="#"]):not([href=""]), button');
+    if (linkEl) {
+      const text = (linkEl.textContent || '').trim();
+      const href = linkEl.getAttribute('href') || '';
+      if (text && text.length < 100) {
+        contentItem.cta = {
+          text,
+          href: resolveUrl(href),
+        };
+      }
+    }
+
+    // Only add if we found meaningful content
+    if (contentItem.heading || contentItem.image || contentItem.cta) {
+      items.push(contentItem);
+    }
+  });
+
+  return items;
 }
 
 /**
@@ -531,13 +722,34 @@ DO NOT invent or guess image URLs. ONLY use the numbered references above.
 `
     : '';
 
+  // Build content manifest for repeating items (CRITICAL for content fidelity)
+  const contentManifest = extractedContent.items && extractedContent.items.length > 1
+    ? `
+## CONTENT MANIFEST - MANDATORY ITEMS (${extractedContent.items.length} items)
+**CRITICAL: You MUST generate EXACTLY ${extractedContent.items.length} rows in your HTML, one for each item below.**
+**DO NOT summarize, abbreviate, or skip any items. ALL ${extractedContent.items.length} items MUST appear.**
+
+${extractedContent.items.map((item, i) => {
+  const parts = [];
+  if (item.image) parts.push(`Image: [IMG_${i + 1}]`);
+  if (item.heading) parts.push(`Heading: "${item.heading}"`);
+  if (item.paragraph) parts.push(`Text: "${item.paragraph.substring(0, 80)}${item.paragraph.length > 80 ? '...' : ''}"`);
+  if (item.cta) parts.push(`CTA: "${item.cta.text}" -> ${item.cta.href}`);
+  return `ITEM ${item.index}: ${parts.join(' | ')}`;
+}).join('\n')}
+
+**VERIFICATION: Your generated HTML must have exactly ${extractedContent.items.length} <div> rows inside the block.**
+`
+    : '';
+
   // Build a rich prompt with all context
   const contentSummary = `
 EXTRACTED CONTENT:
 - Headings: ${extractedContent.headings.map(h => `H${h.level}: "${h.text}"`).join(', ')}
 - Paragraphs: ${extractedContent.paragraphs.map(p => `"${p.substring(0, 50)}..."`).join(', ')}
 - CTAs: ${extractedContent.ctas.map(c => `"${c.text}" (${c.style}) -> ${c.href}`).join(', ')}
-${imageRefList}`;
+${imageRefList}
+${contentManifest}`;
 
   const structureSummary = `
 COMPONENT ANALYSIS:
