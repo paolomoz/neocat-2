@@ -1607,37 +1607,6 @@ function getApiDocsPage(): string {
     code { background: var(--bg-code); padding: 2px 6px; border-radius: 4px; font-family: 'Monaco', 'Menlo', monospace; font-size: 0.85rem; }
     pre { background: var(--bg-code); padding: 16px; border-radius: 8px; overflow-x: auto; font-size: 0.85rem; line-height: 1.5; }
     pre code { background: none; padding: 0; }
-    .try-it { background: var(--bg-card); border-radius: 12px; padding: 25px; border: 1px solid var(--border); }
-    .try-it h2 { margin-bottom: 20px; display: flex; align-items: center; gap: 10px; }
-    .input-group { margin-bottom: 20px; }
-    .input-group label { display: block; margin-bottom: 8px; font-size: 0.9rem; color: var(--text-muted); }
-    .input-row { display: flex; gap: 10px; }
-    input[type="text"], select { flex: 1; padding: 12px 16px; background: var(--bg); border: 1px solid var(--border); border-radius: 8px; color: var(--text); font-size: 1rem; }
-    input[type="text"]:focus, select:focus { outline: none; border-color: var(--accent); }
-    input[type="text"]::placeholder { color: var(--text-muted); }
-    select { cursor: pointer; }
-    button { padding: 12px 24px; background: var(--accent); border: none; border-radius: 8px; color: white; font-size: 1rem; font-weight: 600; cursor: pointer; transition: background 0.2s; }
-    button:hover { background: #2563eb; }
-    button:disabled { background: var(--border); cursor: not-allowed; }
-    .results { margin-top: 25px; }
-    .results-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 10px; }
-    .results-header h3 { font-size: 0.9rem; color: var(--text-muted); }
-    .results-meta { font-size: 0.8rem; color: var(--text-muted); }
-    .results-content { background: var(--bg-code); border-radius: 8px; padding: 16px; max-height: 500px; overflow: auto; }
-    .result-card { background: var(--bg-card); border: 1px solid var(--border); border-radius: 8px; padding: 16px; margin-bottom: 12px; }
-    .result-card:last-child { margin-bottom: 0; }
-    .result-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 10px; }
-    .result-name { font-weight: 600; font-size: 1.1rem; }
-    .result-scores { display: flex; gap: 8px; }
-    .score-badge { padding: 4px 10px; border-radius: 12px; font-size: 0.75rem; font-weight: 600; }
-    .score-badge.gold { background: var(--gold); color: #000; }
-    .score-badge.silver { background: #6b7280; color: #fff; }
-    .score-badge.bronze { background: #b45309; color: #fff; }
-    .score-badge.similarity { background: var(--accent); color: #fff; }
-    .result-html { background: var(--bg); padding: 12px; border-radius: 6px; font-family: monospace; font-size: 0.8rem; max-height: 150px; overflow: auto; white-space: pre-wrap; word-break: break-all; color: var(--text-muted); margin-top: 10px; }
-    .loading { text-align: center; padding: 40px; color: var(--text-muted); }
-    .spinner { width: 30px; height: 30px; border: 3px solid var(--border); border-top-color: var(--accent); border-radius: 50%; animation: spin 1s linear infinite; margin: 0 auto 15px; }
-    @keyframes spin { to { transform: rotate(360deg); } }
     .back-link { display: inline-flex; align-items: center; gap: 6px; color: var(--accent); text-decoration: none; margin-bottom: 20px; font-size: 0.9rem; }
     .back-link:hover { text-decoration: underline; }
     .response-schema { background: var(--bg-code); border-radius: 8px; padding: 16px; margin-top: 15px; }
@@ -1645,7 +1614,6 @@ function getApiDocsPage(): string {
     .copy-btn:hover { background: var(--accent); }
     @media (max-width: 600px) {
       .param { grid-template-columns: 1fr; gap: 4px; }
-      .input-row { flex-direction: column; }
     }
   </style>
 </head>
@@ -1657,39 +1625,6 @@ function getApiDocsPage(): string {
       <h1>EDS Block Collection API <span class="badge experimental">Experimental</span></h1>
       <p>REST API for searching and retrieving AEM Edge Delivery Services block examples</p>
     </header>
-
-    <section class="try-it">
-      <h2>&#x1F9EA; Try It</h2>
-      <div class="input-group">
-        <label>Search Query</label>
-        <input type="text" id="searchQuery" placeholder="e.g., hero with image and call to action" value="hero with image">
-      </div>
-      <div class="input-group">
-        <label>Filters</label>
-        <div class="input-row">
-          <select id="tierFilter">
-            <option value="">Any Quality Tier</option>
-            <option value="gold" selected>Gold Only</option>
-            <option value="silver">Silver Only</option>
-            <option value="bronze">Bronze Only</option>
-          </select>
-          <select id="limitFilter">
-            <option value="3">3 results</option>
-            <option value="5" selected>5 results</option>
-            <option value="10">10 results</option>
-          </select>
-        </div>
-      </div>
-      <button onclick="runSearch()" id="searchBtn">Search Blocks</button>
-
-      <div class="results" id="results" style="display: none;">
-        <div class="results-header">
-          <h3>Results</h3>
-          <span class="results-meta" id="resultsMeta"></span>
-        </div>
-        <div class="results-content" id="resultsContent"></div>
-      </div>
-    </section>
 
     <section class="section">
       <h2>Endpoints</h2>
@@ -1859,78 +1794,6 @@ console.log(reference.content_model);      // Content model schema
 console.log(reference.quality_breakdown);  // Quality scores</code></pre>
     </section>
   </div>
-
-  <script>
-    const API_BASE = location.origin;
-
-    async function runSearch() {
-      const query = document.getElementById('searchQuery').value.trim();
-      const tier = document.getElementById('tierFilter').value;
-      const limit = document.getElementById('limitFilter').value;
-      const btn = document.getElementById('searchBtn');
-      const results = document.getElementById('results');
-      const content = document.getElementById('resultsContent');
-      const meta = document.getElementById('resultsMeta');
-
-      if (!query) {
-        alert('Please enter a search query');
-        return;
-      }
-
-      btn.disabled = true;
-      btn.textContent = 'Searching...';
-      results.style.display = 'block';
-      content.innerHTML = '<div class="loading"><div class="spinner"></div>Searching blocks...</div>';
-
-      try {
-        const params = new URLSearchParams({ q: query, limit });
-        if (tier) params.set('tier', tier);
-
-        const url = API_BASE + '/blocks/search?' + params.toString();
-        const start = Date.now();
-        const response = await fetch(url);
-        const data = await response.json();
-        const elapsed = Date.now() - start;
-
-        meta.textContent = data.data?.length + ' results in ' + elapsed + 'ms';
-
-        if (data.success && data.data?.length > 0) {
-          content.innerHTML = data.data.map(block => \`
-            <div class="result-card">
-              <div class="result-header">
-                <span class="result-name">\${escapeHtml(block.block_name)}</span>
-                <div class="result-scores">
-                  <span class="score-badge \${block.quality_tier}">\${block.quality_tier} \${block.quality_score}</span>
-                  \${block.similarityScore ? '<span class="score-badge similarity">' + (block.similarityScore * 100).toFixed(1) + '% match</span>' : ''}
-                </div>
-              </div>
-              <div style="color: var(--text-muted); font-size: 0.85rem;">\${escapeHtml(block.description || '')}</div>
-              <div class="result-html">\${escapeHtml(block.cleaned_html || block.html || 'No HTML').substring(0, 800)}</div>
-            </div>
-          \`).join('');
-        } else if (data.success) {
-          content.innerHTML = '<div class="loading">No blocks found matching your query</div>';
-        } else {
-          content.innerHTML = '<div class="loading" style="color: #ef4444;">Error: ' + escapeHtml(data.error || 'Unknown error') + '</div>';
-        }
-      } catch (e) {
-        content.innerHTML = '<div class="loading" style="color: #ef4444;">Request failed: ' + escapeHtml(e.message) + '</div>';
-      }
-
-      btn.disabled = false;
-      btn.textContent = 'Search Blocks';
-    }
-
-    function escapeHtml(str) {
-      if (!str) return '';
-      return str.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
-    }
-
-    // Allow Enter to search
-    document.getElementById('searchQuery').addEventListener('keydown', (e) => {
-      if (e.key === 'Enter') runSearch();
-    });
-  </script>
 </body>
 </html>`;
 }
