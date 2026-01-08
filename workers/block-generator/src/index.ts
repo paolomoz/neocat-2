@@ -42,7 +42,22 @@ import { detectBlocksInBrowser, DetectedBlock, PageDetectionResult } from './blo
 import { detectBlocksVisually, VisualDetectionResult } from './visual-block-detector';
 import { detectBlocksAnnotated, AnnotatedDetectionResult } from './annotated-detector';
 import { detectBlocksSmart, SmartDetectionResult } from './smart-detector';
-import { generateBlockEnhanced, EnhancedBlockCode } from './enhanced-generator';
+import {
+  generateBlockEnhanced,
+  EnhancedBlockCode,
+  extractToContentModel,
+  generateFromContentModel,
+  generateBlockTwoStep,
+  compareContentModels,
+  ContentExtractionResult,
+} from './enhanced-generator';
+import {
+  ExtractContentRequest,
+  ExtractContentResponse,
+  GenerateFromContentRequest,
+  GenerateFromContentResponse,
+  BlockContentModel,
+} from './types';
 import { extractComputedStyles, formatStylesForPrompt } from './style-extractor';
 import { detectBlocks, captureBlockScreenshot, DetectedBlock as BBoxBlock, BoundingBox } from './bbox-detector';
 import { detectBlocksHybrid, ClassifiedBlock, HybridDetectionResult } from './hybrid-detector';
@@ -393,6 +408,21 @@ export default {
 
     if (url.pathname === '/session-id' && request.method === 'GET') {
       return Response.json({ sessionId: generateSessionId() }, { headers: corsHeaders(env) });
+    }
+
+    // Two-Step Generation: Extract content to model
+    if (url.pathname === '/extract-content' && request.method === 'POST') {
+      return handleExtractContent(request, env);
+    }
+
+    // Two-Step Generation: Generate block from content model
+    if (url.pathname === '/generate-from-content' && request.method === 'POST') {
+      return handleGenerateFromContent(request, env);
+    }
+
+    // Two-Step Generation: Full pipeline (extract + validate + generate)
+    if (url.pathname === '/block-generate-two-step' && request.method === 'POST') {
+      return handleBlockGenerateTwoStep(request, env);
     }
 
     // Design System Import endpoint
@@ -8048,6 +8078,375 @@ async function handleDesignSystemFinalize(request: Request, env: Env): Promise<R
       { success: false, error: String(error), code: 'INTERNAL_ERROR' },
       { status: 500, headers: corsHeaders(env) }
     );
+  }
+}
+
+// =============================================================================
+// Two-Step Generation Handlers
+// =============================================================================
+
+/**
+ * Handle /extract-content endpoint
+ * Step 1: Extract structured content model from source
+ */
+async function handleExtractContent(request: Request, env: Env): Promise<Response> {
+  try {
+    const formData = await request.formData();
+
+    const url = formData.get('url') as string;
+    const screenshotFile = formData.get('screenshot') as File;
+    const html = formData.get('html') as string;
+    const xpath = formData.get('xpath') as string;
+    const backgroundImagesJson = formData.get('backgroundImages') as string;
+
+    // Validate required fields
+    const missing: string[] = [];
+    if (!url) missing.push('url');
+    if (!screenshotFile) missing.push('screenshot');
+    if (!html && !xpath) missing.push('html or xpath');
+
+    if (missing.length > 0) {
+      return Response.json(
+        { success: false, error: `Missing required fields: ${missing.join(', ')}`, code: 'INVALID_REQUEST' },
+        { status: 400, headers: corsHeaders(env) }
+      );
+    }
+
+    // Get Anthropic config
+    const anthropicConfig = getAnthropicConfig(env);
+    if (!anthropicConfig) {
+      return Response.json(
+        { success: false, error: 'Anthropic API not configured', code: 'INTERNAL_ERROR' },
+        { status: 500, headers: corsHeaders(env) }
+      );
+    }
+
+    if (!env.BROWSER) {
+      return Response.json(
+        { success: false, error: 'Browser Rendering not configured', code: 'INTERNAL_ERROR' },
+        { status: 500, headers: corsHeaders(env) }
+      );
+    }
+
+    // Convert screenshot to base64
+    const arrayBuffer = await screenshotFile.arrayBuffer();
+    const screenshotBase64 = arrayBufferToBase64(arrayBuffer);
+
+    // Parse background images
+    let liveImages: Array<{ src: string; alt: string; role: 'photo' | 'background' | 'icon' }> = [];
+    if (backgroundImagesJson) {
+      try {
+        const parsed = JSON.parse(backgroundImagesJson);
+        liveImages = parsed.map((img: { src: string; alt?: string; role?: string }) => ({
+          src: img.src,
+          alt: img.alt || '',
+          role: (img.role || 'photo') as 'photo' | 'background' | 'icon',
+        }));
+      } catch (e) {
+        console.warn('Failed to parse backgroundImages:', e);
+      }
+    }
+
+    // If xpath provided but no html, fetch html from page
+    let elementHtml = html;
+    if (!elementHtml && xpath) {
+      const browser = await launchBrowserWithRetry(env.BROWSER);
+      try {
+        const page = await browser.newPage();
+        await page.goto(url, { waitUntil: 'networkidle0', timeout: 30000 });
+
+        elementHtml = await page.evaluate((xpathQuery: string) => {
+          const result = document.evaluate(
+            xpathQuery,
+            document,
+            null,
+            XPathResult.FIRST_ORDERED_NODE_TYPE,
+            null
+          );
+          const element = result.singleNodeValue as HTMLElement;
+          return element?.outerHTML || '';
+        }, xpath);
+
+        // Also extract live images from page
+        const extractedImages = await extractLiveImages(page, xpath);
+        if (extractedImages.length > 0) {
+          liveImages = [...liveImages, ...extractedImages.map(img => ({
+            src: img.src,
+            alt: img.alt,
+            role: img.role,
+          }))];
+        }
+
+        await page.close();
+      } finally {
+        await browser.close();
+      }
+    }
+
+    if (!elementHtml) {
+      return Response.json(
+        { success: false, error: 'Could not extract HTML content', code: 'EXTRACTION_FAILED' },
+        { status: 400, headers: corsHeaders(env) }
+      );
+    }
+
+    // Extract content model
+    const extractionResult = await extractToContentModel(
+      screenshotBase64,
+      elementHtml,
+      url,
+      anthropicConfig,
+      liveImages.length > 0 ? liveImages : undefined
+    );
+
+    // Return the content model and validation
+    const response: ExtractContentResponse = {
+      success: true,
+      contentModel: extractionResult.model,
+      validation: extractionResult.validation,
+    };
+
+    return Response.json(response, { status: 200, headers: corsHeaders(env) });
+
+  } catch (error) {
+    return handleError(error, env);
+  }
+}
+
+/**
+ * Handle /generate-from-content endpoint
+ * Step 2: Generate block from content model
+ */
+async function handleGenerateFromContent(request: Request, env: Env): Promise<Response> {
+  try {
+    const body = await request.json() as GenerateFromContentRequest;
+    const { contentModel, extractedStyles, screenshot } = body;
+
+    if (!contentModel) {
+      return Response.json(
+        { success: false, error: 'Missing contentModel', code: 'INVALID_REQUEST' },
+        { status: 400, headers: corsHeaders(env) }
+      );
+    }
+
+    // Get Anthropic config (optional for deterministic mode)
+    const anthropicConfig = getAnthropicConfig(env);
+
+    // Create a minimal extraction result structure
+    const extractionResult: ContentExtractionResult = {
+      model: contentModel,
+      validation: { isValid: true, errors: [], warnings: [], suggestions: [] },
+      componentDescription: {
+        componentType: contentModel.description.componentType,
+        structure: {
+          layout: contentModel.description.layout,
+          layers: contentModel.description.layers,
+          contentHierarchy: [],
+        },
+        design: {
+          colorScheme: contentModel.description.colorScheme,
+          effects: contentModel.description.effects,
+          textStyle: '',
+          spacing: '',
+        },
+        contentElements: {
+          headings: [],
+          paragraphs: [],
+          images: [],
+          ctas: [],
+        },
+      },
+    };
+
+    // Determine generation mode
+    const mode = (screenshot && extractedStyles && anthropicConfig) ? 'styled' : 'deterministic';
+
+    const block = await generateFromContentModel(extractionResult, {
+      mode,
+      screenshotBase64: screenshot,
+      extractedCssStyles: extractedStyles,
+      config: anthropicConfig,
+    });
+
+    const response: GenerateFromContentResponse = {
+      success: true,
+      blockName: block.blockName,
+      html: block.html,
+      css: block.css,
+      js: block.js,
+    };
+
+    return Response.json(response, { status: 200, headers: corsHeaders(env) });
+
+  } catch (error) {
+    return handleError(error, env);
+  }
+}
+
+/**
+ * Handle /block-generate-two-step endpoint
+ * Full pipeline: extract + validate + generate in one call
+ */
+async function handleBlockGenerateTwoStep(request: Request, env: Env): Promise<Response> {
+  try {
+    const formData = await request.formData();
+
+    const url = formData.get('url') as string;
+    const screenshotFile = formData.get('screenshot') as File;
+    const html = formData.get('html') as string;
+    const xpath = formData.get('xpath') as string;
+    const backgroundImagesJson = formData.get('backgroundImages') as string;
+    const modeParam = formData.get('mode') as string || 'hybrid';
+    const strictValidation = formData.get('strictValidation') === 'true';
+
+    // Validate required fields
+    const missing: string[] = [];
+    if (!url) missing.push('url');
+    if (!screenshotFile) missing.push('screenshot');
+    if (!html && !xpath) missing.push('html or xpath');
+
+    if (missing.length > 0) {
+      return Response.json(
+        { success: false, error: `Missing required fields: ${missing.join(', ')}`, code: 'INVALID_REQUEST' },
+        { status: 400, headers: corsHeaders(env) }
+      );
+    }
+
+    // Get Anthropic config
+    const anthropicConfig = getAnthropicConfig(env);
+    if (!anthropicConfig) {
+      return Response.json(
+        { success: false, error: 'Anthropic API not configured', code: 'INTERNAL_ERROR' },
+        { status: 500, headers: corsHeaders(env) }
+      );
+    }
+
+    if (!env.BROWSER) {
+      return Response.json(
+        { success: false, error: 'Browser Rendering not configured', code: 'INTERNAL_ERROR' },
+        { status: 500, headers: corsHeaders(env) }
+      );
+    }
+
+    // Convert screenshot to base64
+    const arrayBuffer = await screenshotFile.arrayBuffer();
+    let screenshotBase64 = arrayBufferToBase64(arrayBuffer);
+
+    // Parse background images
+    let liveImages: Array<{ src: string; alt: string; role: 'photo' | 'background' | 'icon' }> = [];
+    if (backgroundImagesJson) {
+      try {
+        const parsed = JSON.parse(backgroundImagesJson);
+        liveImages = parsed.map((img: { src: string; alt?: string; role?: string }) => ({
+          src: img.src,
+          alt: img.alt || '',
+          role: (img.role || 'photo') as 'photo' | 'background' | 'icon',
+        }));
+      } catch (e) {
+        console.warn('Failed to parse backgroundImages:', e);
+      }
+    }
+
+    let elementHtml = html;
+    let extractedCssStyles = '';
+
+    const browser = await launchBrowserWithRetry(env.BROWSER);
+    try {
+      // Compress screenshot if needed
+      const compressed = await compressImageIfNeeded(browser, screenshotBase64);
+      screenshotBase64 = compressed.data;
+
+      // If xpath provided, fetch HTML and extract more data
+      if (!elementHtml && xpath) {
+        const page = await browser.newPage();
+        await page.goto(url, { waitUntil: 'networkidle0', timeout: 30000 });
+
+        // Extract HTML
+        elementHtml = await page.evaluate((xpathQuery: string) => {
+          const result = document.evaluate(
+            xpathQuery,
+            document,
+            null,
+            XPathResult.FIRST_ORDERED_NODE_TYPE,
+            null
+          );
+          const element = result.singleNodeValue as HTMLElement;
+          return element?.outerHTML || '';
+        }, xpath);
+
+        // Extract live images
+        const extractedImages = await extractLiveImages(page, xpath);
+        if (extractedImages.length > 0) {
+          liveImages = [...liveImages, ...extractedImages.map(img => ({
+            src: img.src,
+            alt: img.alt,
+            role: img.role,
+          }))];
+        }
+
+        // Extract CSS styles
+        const styles = await extractComputedStyles(page, xpath);
+        extractedCssStyles = formatStylesForPrompt(styles);
+
+        await page.close();
+      }
+    } finally {
+      await browser.close();
+    }
+
+    if (!elementHtml) {
+      return Response.json(
+        { success: false, error: 'Could not extract HTML content', code: 'EXTRACTION_FAILED' },
+        { status: 400, headers: corsHeaders(env) }
+      );
+    }
+
+    // Run the two-step generation pipeline
+    const mode = ['deterministic', 'styled', 'hybrid'].includes(modeParam)
+      ? modeParam as 'deterministic' | 'styled' | 'hybrid'
+      : 'hybrid';
+
+    const result = await generateBlockTwoStep(
+      screenshotBase64,
+      elementHtml,
+      url,
+      anthropicConfig,
+      {
+        extractedCssStyles,
+        liveImages: liveImages.length > 0 ? liveImages : undefined,
+        mode,
+        strictValidation,
+      }
+    );
+
+    // Build response with content model for transparency
+    return Response.json({
+      success: true,
+      blockName: result.block.blockName,
+      layoutPattern: result.contentModel.blockType,
+      html: result.block.html,
+      js: result.block.js,
+      css: result.block.css,
+      contentModel: result.contentModel,
+      validation: result.validation,
+      metadata: {
+        elementCount: result.contentModel.content.items.length,
+        hasImages: result.contentModel.content.items.some(
+          item => item.cells.some(c => c.elements.some(e => e.type === 'image'))
+        ),
+        hasHeadings: result.contentModel.content.items.some(
+          item => item.cells.some(c => c.elements.some(e => e.type === 'heading'))
+        ),
+        hasLinks: result.contentModel.content.items.some(
+          item => item.cells.some(c => c.elements.some(e => e.type === 'link'))
+        ),
+        rowCount: result.contentModel.content.items.length,
+        columnCount: Math.max(...result.contentModel.content.items.map(i => i.cells.length), 0),
+      },
+    }, { status: 200, headers: corsHeaders(env) });
+
+  } catch (error) {
+    return handleError(error, env);
   }
 }
 

@@ -454,3 +454,195 @@ export interface ParsedCSS {
     base64Data?: string;
   }>;
 }
+
+// =============================================================================
+// Block Content Model Types (Two-Step Generation)
+// =============================================================================
+
+/**
+ * Content element within a block item cell
+ */
+export interface ContentElement {
+  /** Element type */
+  type: 'heading' | 'paragraph' | 'image' | 'link' | 'list' | 'raw';
+  /** Text content (for heading, paragraph, link) */
+  text?: string;
+  /** Heading level (1-6) */
+  level?: number;
+  /** Link href */
+  href?: string;
+  /** Image source URL */
+  src?: string;
+  /** Image alt text */
+  alt?: string;
+  /** Image role classification */
+  imageRole?: 'photo' | 'background' | 'icon';
+  /** List items (for type: 'list') */
+  listItems?: string[];
+  /** Raw HTML (for type: 'raw') */
+  html?: string;
+}
+
+/**
+ * A cell within a block item (maps to a column in the EDS table structure)
+ */
+export interface ContentCell {
+  /** Cell purpose identifier */
+  name: string;
+  /** Content elements in this cell */
+  elements: ContentElement[];
+}
+
+/**
+ * A single item in the block (maps to a row in EDS table structure)
+ * For cards: one item = one card
+ * For carousels: one item = one slide
+ * For columns: one item = one column set
+ */
+export interface ContentItem {
+  /** Item index (0-based) */
+  index: number;
+  /** Cells within this item */
+  cells: ContentCell[];
+}
+
+/**
+ * Block content model definition - defines expected structure for a block type
+ */
+export interface BlockContentModelDefinition {
+  /** Block type identifier */
+  blockType: LayoutPattern;
+  /** Whether the block has repeating items */
+  repeating: boolean;
+  /** Expected cell structure for each item */
+  cellStructure: Array<{
+    name: string;
+    description: string;
+    required: boolean;
+    elementTypes: ContentElement['type'][];
+  }>;
+}
+
+/**
+ * Structured content model for a block - the intermediate JSON representation
+ * This is the contract between content extraction and block generation
+ */
+export interface BlockContentModel {
+  /** Block type */
+  blockType: LayoutPattern;
+  /** Suggested block name */
+  blockName: string;
+  /** Block variant (e.g., 'hero' for hero-carousel) */
+  variant?: string;
+
+  /** Visual/component description from analysis */
+  description: {
+    componentType: string;
+    layout: string;
+    layers?: string[];
+    colorScheme: string;
+    effects?: string[];
+  };
+
+  /** Content structure */
+  content: {
+    /** Block-level title (above items) */
+    title?: ContentElement;
+    /** Block-level subtitle */
+    subtitle?: ContentElement;
+    /** Repeating items (slides, cards, columns, etc.) */
+    items: ContentItem[];
+  };
+
+  /** Extracted styling information */
+  styling?: {
+    colors?: Record<string, string>;
+    typography?: Record<string, string>;
+    spacing?: Record<string, string>;
+    layout?: Record<string, string>;
+    buttons?: Record<string, string>;
+  };
+
+  /** Validation metadata */
+  validation: {
+    /** Total number of items extracted */
+    itemCount: number;
+    /** Number of items with complete required content */
+    completeItems: number;
+    /** Warnings about extraction issues */
+    warnings: string[];
+    /** Whether all required content was found */
+    isComplete: boolean;
+  };
+
+  /** Source information */
+  source: {
+    url: string;
+    extractedAt: string;
+    /** Original element selector or description */
+    selector?: string;
+  };
+}
+
+/**
+ * Validation result for content model
+ */
+export interface ContentModelValidation {
+  isValid: boolean;
+  errors: string[];
+  warnings: string[];
+  /** Suggested fixes for common issues */
+  suggestions: string[];
+}
+
+/**
+ * Request to extract content to structured model
+ */
+export interface ExtractContentRequest {
+  /** Source page URL */
+  url: string;
+  /** Screenshot as base64 */
+  screenshot: string;
+  /** HTML of the element */
+  html: string;
+  /** Optional XPath selector */
+  xpath?: string;
+  /** Optional CSS selector */
+  selector?: string;
+  /** Background images from CSS */
+  backgroundImages?: Array<{ url: string; selector: string }>;
+}
+
+/**
+ * Response from content extraction
+ */
+export interface ExtractContentResponse {
+  success: true;
+  /** Extracted content model */
+  contentModel: BlockContentModel;
+  /** Validation results */
+  validation: ContentModelValidation;
+}
+
+/**
+ * Request to generate block from content model
+ */
+export interface GenerateFromContentRequest {
+  /** The extracted content model */
+  contentModel: BlockContentModel;
+  /** Optional extracted CSS styles */
+  extractedStyles?: string;
+  /** Optional screenshot for visual reference */
+  screenshot?: string;
+}
+
+/**
+ * Response from block generation
+ */
+export interface GenerateFromContentResponse {
+  success: true;
+  blockName: string;
+  html: string;
+  css: string;
+  js: string;
+}

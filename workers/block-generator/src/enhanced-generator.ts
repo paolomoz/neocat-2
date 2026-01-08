@@ -1,5 +1,20 @@
 import { parseHTML } from 'linkedom';
 import { AnthropicConfig } from './design-analyzer';
+import {
+  BlockContentModel,
+  ContentModelValidation,
+} from './types';
+import {
+  extractContentModel,
+  validateContentModel,
+  mergeImagesIntoModel,
+  formatContentModelSummary,
+} from './content-model';
+import {
+  generateBlockFromModel,
+  generateBlockWithStyling,
+  GeneratedBlock,
+} from './content-to-block';
 
 /**
  * Detailed component description from Claude
@@ -243,17 +258,71 @@ Return ONLY the JSON object.`;
 
   const response = await callClaude(screenshotBase64, prompt, config, imageMediaType);
 
-  try {
-    const match = response.match(/\{[\s\S]*\}/);
-    if (!match) {
-      throw new Error(`No JSON object found in Claude response. Response starts with: ${response.substring(0, 200)}`);
-    }
-    return JSON.parse(match[0]) as ComponentDescription;
-  } catch (e) {
-    const errorMsg = e instanceof Error ? e.message : String(e);
-    console.error('Failed to parse component description:', response.substring(0, 500));
-    throw new Error(`Failed to parse component description: ${errorMsg}`);
+  // Clean up response - remove markdown code fences if present
+  let cleanedResponse = response
+    .replace(/^```(?:json)?\s*/i, '')  // Remove opening fence
+    .replace(/\s*```\s*$/i, '')        // Remove closing fence
+    .trim();
+
+  // Extract JSON object
+  const match = cleanedResponse.match(/\{[\s\S]*\}/);
+  if (!match) {
+    console.error('Failed to parse component description - no JSON found:', response.substring(0, 500));
+    throw new Error(`No JSON object found in Claude response. Response starts with: ${response.substring(0, 200)}`);
   }
+
+  let jsonStr = match[0];
+
+  // Strategy 1: Try direct parse
+  try {
+    return JSON.parse(jsonStr) as ComponentDescription;
+  } catch (directError) {
+    console.log('Direct JSON parse failed, attempting repair...');
+  }
+
+  // Strategy 2: Try with repairJson
+  try {
+    const repaired = repairJson(jsonStr);
+    return JSON.parse(repaired) as ComponentDescription;
+  } catch (repairError) {
+    console.log('JSON repair failed, attempting minimal fallback...');
+  }
+
+  // Strategy 3: Create a minimal valid description if we can extract key fields
+  try {
+    const componentTypeMatch = jsonStr.match(/"componentType"\s*:\s*"([^"]+)"/);
+    const layoutMatch = jsonStr.match(/"layout"\s*:\s*"([^"]+)"/);
+
+    if (componentTypeMatch) {
+      console.log('Using minimal fallback description');
+      return {
+        componentType: componentTypeMatch[1],
+        structure: {
+          layout: layoutMatch ? layoutMatch[1] : 'unknown',
+          layers: [],
+          contentHierarchy: []
+        },
+        design: {
+          colorScheme: 'unknown',
+          backgroundTreatment: 'unknown',
+          textStyle: 'unknown',
+          spacing: 'unknown',
+          effects: []
+        },
+        contentElements: {
+          headings: [],
+          paragraphs: [],
+          images: [],
+          ctas: []
+        }
+      } as ComponentDescription;
+    }
+  } catch (fallbackError) {
+    // Continue to error
+  }
+
+  console.error('Failed to parse component description:', response.substring(0, 500));
+  throw new Error(`Failed to parse component description from Claude response`);
 }
 
 /**
@@ -951,4 +1020,256 @@ async function callClaude(
   }
 
   return textContent.text;
+}
+
+// =============================================================================
+// Two-Step Generation Pipeline
+// =============================================================================
+
+/**
+ * Result from content model extraction (Step 1)
+ */
+export interface ContentExtractionResult {
+  model: BlockContentModel;
+  validation: ContentModelValidation;
+  componentDescription: ComponentDescription;
+}
+
+/**
+ * Step 1 of two-step generation: Extract content to structured model
+ *
+ * This creates a faithful, validated representation of the source content
+ * that can be inspected before generation.
+ */
+export async function extractToContentModel(
+  screenshotBase64: string,
+  elementHtml: string,
+  baseUrl: string,
+  config: AnthropicConfig,
+  liveImages?: LiveImage[],
+  imageMediaType: 'image/png' | 'image/jpeg' = 'image/png'
+): Promise<ContentExtractionResult> {
+  console.log('Two-Step Generation - Step 1: Extracting content model...');
+
+  // Get component description from Claude (vision analysis)
+  const componentDescription = await describeComponent(screenshotBase64, config, imageMediaType);
+  console.log(`  Component type: ${componentDescription.componentType}`);
+
+  // Extract structured content model
+  let model = extractContentModel(elementHtml, baseUrl, componentDescription);
+  console.log(`  Extracted ${model.content.items.length} items`);
+
+  // Merge live images (more reliable than static HTML parsing)
+  if (liveImages && liveImages.length > 0) {
+    console.log(`  Merging ${liveImages.length} live images`);
+    model = mergeImagesIntoModel(model, liveImages);
+  }
+
+  // Validate the extraction
+  const validation = validateContentModel(model);
+
+  if (!validation.isValid) {
+    console.warn('  Validation errors:', validation.errors);
+  }
+  if (validation.warnings.length > 0) {
+    console.warn('  Validation warnings:', validation.warnings);
+  }
+
+  console.log('  Content model summary:');
+  console.log(formatContentModelSummary(model).split('\n').map(l => '    ' + l).join('\n'));
+
+  return {
+    model,
+    validation,
+    componentDescription,
+  };
+}
+
+/**
+ * Step 2 of two-step generation: Generate block from content model
+ *
+ * This creates the EDS block code from the validated content model.
+ * Two modes available:
+ * - Deterministic: No LLM, pure transformation (fastest, most reliable for content)
+ * - Styled: Uses LLM to enhance CSS based on screenshot (better visual match)
+ */
+export async function generateFromContentModel(
+  extractionResult: ContentExtractionResult,
+  options: {
+    mode: 'deterministic' | 'styled';
+    screenshotBase64?: string;
+    extractedCssStyles?: string;
+    config?: AnthropicConfig;
+  }
+): Promise<EnhancedBlockCode> {
+  console.log(`Two-Step Generation - Step 2: Generating block (${options.mode} mode)...`);
+
+  const { model, componentDescription } = extractionResult;
+
+  let block: GeneratedBlock;
+
+  if (options.mode === 'styled' && options.screenshotBase64 && options.config && options.extractedCssStyles) {
+    // Use LLM for CSS styling while keeping content deterministic
+    block = await generateBlockWithStyling(
+      model,
+      options.screenshotBase64,
+      options.extractedCssStyles,
+      options.config
+    );
+  } else {
+    // Pure deterministic generation
+    block = generateBlockFromModel(model);
+  }
+
+  console.log(`  Generated block: ${block.blockName}`);
+
+  return {
+    blockName: block.blockName,
+    componentType: componentDescription.componentType,
+    html: block.html,
+    css: block.css,
+    js: block.js,
+    description: componentDescription,
+  };
+}
+
+/**
+ * Full two-step generation pipeline
+ *
+ * Combines extraction and generation with validation in between.
+ * This is the recommended approach for faithful content reproduction.
+ */
+export async function generateBlockTwoStep(
+  screenshotBase64: string,
+  elementHtml: string,
+  baseUrl: string,
+  config: AnthropicConfig,
+  options: {
+    extractedCssStyles?: string;
+    liveImages?: LiveImage[];
+    imageMediaType?: 'image/png' | 'image/jpeg';
+    /**
+     * Generation mode:
+     * - 'deterministic': No LLM for generation, pure transformation (fastest)
+     * - 'styled': Use LLM to enhance CSS styling (better visual match)
+     * - 'hybrid': Deterministic content + LLM styling (balanced)
+     */
+    mode?: 'deterministic' | 'styled' | 'hybrid';
+    /**
+     * If true, fail on validation errors instead of proceeding with warnings
+     */
+    strictValidation?: boolean;
+  } = {}
+): Promise<{ block: EnhancedBlockCode; contentModel: BlockContentModel; validation: ContentModelValidation }> {
+  const {
+    extractedCssStyles,
+    liveImages,
+    imageMediaType = 'image/png',
+    mode = 'hybrid',
+    strictValidation = false,
+  } = options;
+
+  console.log('=== Two-Step Block Generation ===');
+  console.log(`Mode: ${mode}, Strict validation: ${strictValidation}`);
+
+  // Step 1: Extract content model
+  const extractionResult = await extractToContentModel(
+    screenshotBase64,
+    elementHtml,
+    baseUrl,
+    config,
+    liveImages,
+    imageMediaType
+  );
+
+  // Check validation
+  if (strictValidation && !extractionResult.validation.isValid) {
+    throw new Error(
+      `Content extraction validation failed:\n${extractionResult.validation.errors.join('\n')}`
+    );
+  }
+
+  // Step 2: Generate block
+  const generationMode = mode === 'hybrid' ? 'styled' : mode;
+  const block = await generateFromContentModel(extractionResult, {
+    mode: generationMode,
+    screenshotBase64: generationMode === 'styled' ? screenshotBase64 : undefined,
+    extractedCssStyles,
+    config: generationMode === 'styled' ? config : undefined,
+  });
+
+  console.log('=== Two-Step Generation Complete ===');
+
+  return {
+    block,
+    contentModel: extractionResult.model,
+    validation: extractionResult.validation,
+  };
+}
+
+/**
+ * Compare content model with expected content for quality assurance
+ *
+ * This is useful for verifying extraction completeness against known content.
+ */
+export function compareContentModels(
+  extracted: BlockContentModel,
+  expected: {
+    itemCount: number;
+    requiredHeadings?: string[];
+    requiredImages?: number;
+  }
+): { match: boolean; issues: string[] } {
+  const issues: string[] = [];
+
+  // Check item count
+  if (extracted.content.items.length !== expected.itemCount) {
+    issues.push(
+      `Item count mismatch: extracted ${extracted.content.items.length}, expected ${expected.itemCount}`
+    );
+  }
+
+  // Check required headings
+  if (expected.requiredHeadings) {
+    const extractedHeadings = new Set<string>();
+    extracted.content.items.forEach(item => {
+      item.cells.forEach(cell => {
+        cell.elements.forEach(el => {
+          if (el.type === 'heading' && el.text) {
+            extractedHeadings.add(el.text.toLowerCase().trim());
+          }
+        });
+      });
+    });
+
+    for (const heading of expected.requiredHeadings) {
+      const normalized = heading.toLowerCase().trim();
+      if (!extractedHeadings.has(normalized)) {
+        issues.push(`Missing required heading: "${heading}"`);
+      }
+    }
+  }
+
+  // Check image count
+  if (expected.requiredImages !== undefined) {
+    let imageCount = 0;
+    extracted.content.items.forEach(item => {
+      item.cells.forEach(cell => {
+        cell.elements.forEach(el => {
+          if (el.type === 'image' && el.src) {
+            imageCount++;
+          }
+        });
+      });
+    });
+
+    if (imageCount < expected.requiredImages) {
+      issues.push(`Image count low: extracted ${imageCount}, expected at least ${expected.requiredImages}`);
+    }
+  }
+
+  return {
+    match: issues.length === 0,
+    issues,
+  };
 }
