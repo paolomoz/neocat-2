@@ -1,6 +1,17 @@
 # Your Project's Title...
 Your project's description...
 
+## Browser Extension (Local Development)
+
+To install the AEM Block Importer extension locally:
+
+1. Open Chrome and navigate to `chrome://extensions/`
+2. Enable **Developer mode** (toggle in the top right)
+3. Click **Load unpacked**
+4. Select the `workers/block-generator/chrome-extension` folder from this repository
+
+The extension icon will appear in your browser toolbar.
+
 ## Environments
 - Preview: https://main--{repo}--{owner}.aem.page/
 - Live: https://main--{repo}--{owner}.aem.live/
